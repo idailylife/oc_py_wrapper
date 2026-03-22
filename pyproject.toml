@@ -1,0 +1,26 @@
+[project]
+name = "oc-py-harness"
+version = "0.1.0"
+description = "Async Python wrapper for OpenCode CLI (opencode run --format json)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+markers = [
+    "integration: requires real opencode CLI and configured provider (network/API; slow)",
+    "multi_agent_weather: 11-call weather workflow; enable with OPENCODE_MULTI_AGENT_WEATHER=1",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["opencode_wrapper*"]
