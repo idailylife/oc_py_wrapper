@@ -1,0 +1,43 @@
+{
+  "name": "code-review-benchmark",
+  "description": "Compare two configs on code review and generation tasks",
+  "evals": [
+    {
+      "id": "fizzbuzz",
+      "prompt": "Write a Python function fizzbuzz(n) that returns a list of strings for 1..n with the standard FizzBuzz rules.",
+      "assertions": [
+        "Output contains a function named fizzbuzz",
+        "The function handles multiples of 15 correctly (prints FizzBuzz)",
+        "The function returns a list of strings"
+      ],
+      "expected_output": "A correct fizzbuzz implementation in Python",
+      "workspace": ".",
+      "files": [],
+      "tags": ["generation", "python"]
+    },
+    {
+      "id": "bug-find",
+      "prompt": "Find the bug in this code:\n\ndef binary_search(arr, target):\n    lo, hi = 0, len(arr)\n    while lo < hi:\n        mid = (lo + hi) / 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            lo = mid + 1\n        else:\n            hi = mid\n    return -1",
+      "assertions": [
+        "Identifies that (lo + hi) / 2 should use integer division //",
+        "Explains why float division causes an indexing error"
+      ],
+      "expected_output": "Should identify the integer division bug",
+      "workspace": ".",
+      "files": [],
+      "tags": ["review", "python"]
+    },
+    {
+      "id": "explain-async",
+      "prompt": "Explain in 3 sentences how Python's asyncio event loop works.",
+      "assertions": [
+        "Mentions cooperative multitasking or single-threaded concurrency",
+        "Mentions await or coroutines as the yield mechanism"
+      ],
+      "expected_output": "Clear, concise explanation of asyncio fundamentals",
+      "workspace": ".",
+      "files": [],
+      "tags": ["explanation", "python"]
+    }
+  ]
+}
