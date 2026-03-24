@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -207,9 +208,14 @@ class AsyncOpenCodeClient:
         *,
         run_cfg: RunConfig | None = None,
         timeout_s: float | None = None,
+        log_file: str | Path | None = None,
     ) -> RunResult:
         """
         Run to completion and return a :class:`RunResult`.
+
+        If ``log_file`` is given, each event dict is appended as a JSON line
+        during execution (flushed immediately), so partial progress survives
+        crashes.
 
         Raises :class:`OpenCodeTimeoutError` if ``timeout_s`` elapses.
         """
@@ -225,10 +231,18 @@ class AsyncOpenCodeClient:
             events_acc: list[dict[str, Any]] = []
             raw_acc: list[str] = []
 
-            async with self._managed_process(argv, cwd, env) as (proc, stderr_lines):
-                async for line, ev in _stdout_line_event_iter(proc):
-                    raw_acc.append(line)
-                    events_acc.append(ev)
+            log_fh = open(log_file, "w") if log_file is not None else None
+            try:
+                async with self._managed_process(argv, cwd, env) as (proc, stderr_lines):
+                    async for line, ev in _stdout_line_event_iter(proc):
+                        raw_acc.append(line)
+                        events_acc.append(ev)
+                        if log_fh is not None:
+                            log_fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                            log_fh.flush()
+            finally:
+                if log_fh is not None:
+                    log_fh.close()
 
             code = proc.returncode if proc.returncode is not None else -1
             stderr = "".join(stderr_lines)
