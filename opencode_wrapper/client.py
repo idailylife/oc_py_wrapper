@@ -90,11 +90,37 @@ def build_env(run_cfg: RunConfig, base: Mapping[str, str] | None = None) -> dict
     return env
 
 
+async def _readline_unlimited(reader: asyncio.StreamReader) -> bytes:
+    """readline with no size limit, works around asyncio's default 64 KiB cap.
+
+    Uses ``readuntil()`` directly instead of ``readline()``: unlike ``readline()``,
+    ``readuntil()`` raises ``LimitOverrunError`` *without* clearing the buffer, so
+    we can drain the oversized chunk with ``readexactly()`` and keep looping.
+    """
+    chunks: list[bytes] = []
+    while True:
+        try:
+            chunk = await reader.readuntil(b"\n")
+            if chunks:
+                chunks.append(chunk)
+                return b"".join(chunks)
+            return chunk
+        except asyncio.IncompleteReadError as exc:
+            # EOF reached before newline — return whatever partial data we have
+            if chunks:
+                chunks.append(exc.partial)
+                return b"".join(chunks)
+            return exc.partial
+        except asyncio.LimitOverrunError as exc:
+            # Buffer limit hit but data is still intact; drain consumed bytes and loop
+            chunks.append(bytes(await reader.readexactly(exc.consumed)))
+
+
 async def _drain_stderr(proc: asyncio.subprocess.Process, out: list[str]) -> None:
     if proc.stderr is None:
         return
     while True:
-        chunk = await proc.stderr.readline()
+        chunk = await _readline_unlimited(proc.stderr)
         if not chunk:
             break
         out.append(chunk.decode(errors="replace"))
@@ -106,7 +132,7 @@ async def _stdout_line_event_iter(
     if proc.stdout is None:
         return
     while True:
-        line_b = await proc.stdout.readline()
+        line_b = await _readline_unlimited(proc.stdout)
         if not line_b:
             break
         line = line_b.decode(errors="replace")

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from opencode_wrapper.client import AsyncOpenCodeClient, build_argv, build_env, resolve_binary
+from opencode_wrapper.client import AsyncOpenCodeClient, _readline_unlimited, build_argv, build_env, resolve_binary
 from opencode_wrapper.config import RunConfig
 from opencode_wrapper.errors import OpenCodeBinaryNotFoundError, OpenCodeProcessError, OpenCodeTimeoutError
 
@@ -50,6 +50,50 @@ def test_build_env_config_content_and_autoupdate() -> None:
     assert env.get("OPENCODE_DISABLE_AUTOUPDATE") == "1"
 
 
+@pytest.mark.asyncio
+async def test_readline_unlimited_normal_line() -> None:
+    """Lines within the default 64 KiB limit are returned as-is."""
+    reader = asyncio.StreamReader(limit=2**16)
+    reader.feed_data(b'{"type":"text","content":"hello"}\n')
+    reader.feed_eof()
+    assert await _readline_unlimited(reader) == b'{"type":"text","content":"hello"}\n'
+
+
+@pytest.mark.asyncio
+async def test_readline_unlimited_line_exceeds_default_limit() -> None:
+    """A line just over the default 64 KiB limit must not raise LimitOverrunError."""
+    reader = asyncio.StreamReader(limit=2**16)
+    payload = b"x" * (2**16 + 1)  # 65537 bytes — one byte over the default cap
+    reader.feed_data(payload + b"\n")
+    reader.feed_eof()
+    result = await _readline_unlimited(reader)
+    assert result == payload + b"\n"
+
+
+@pytest.mark.asyncio
+async def test_readline_unlimited_multi_chunk_large_line() -> None:
+    """A line that spans many multiples of the limit is fully reassembled."""
+    reader = asyncio.StreamReader(limit=2**16)
+    payload = b"y" * (2**16 * 5)  # 320 KiB — requires several iterations
+    reader.feed_data(payload + b"\n")
+    reader.feed_eof()
+    result = await _readline_unlimited(reader)
+    assert result == payload + b"\n"
+
+
+@pytest.mark.asyncio
+async def test_readline_unlimited_multiple_lines() -> None:
+    """Multiple lines are returned one at a time in order, even when one is oversized."""
+    reader = asyncio.StreamReader(limit=2**16)
+    small = b"small line\n"
+    big = b"z" * (2**16 + 100) + b"\n"
+    reader.feed_data(small + big + small)
+    reader.feed_eof()
+    assert await _readline_unlimited(reader) == small
+    assert await _readline_unlimited(reader) == big
+    assert await _readline_unlimited(reader) == small
+
+
 class _FakeStdout:
     def __init__(self, lines: list[bytes]) -> None:
         self._q = list(lines)
@@ -60,11 +104,25 @@ class _FakeStdout:
             return b""
         return self._q.pop(0)
 
+    async def readuntil(self, sep: bytes = b"\n") -> bytes:
+        # Test lines are small — readuntil is equivalent to readline here
+        return await self.readline()
+
+    async def readexactly(self, n: int) -> bytes:
+        raise AssertionError("readexactly should not be called for small test lines")
+
 
 class _FakeStderr:
     async def readline(self) -> bytes:
         await asyncio.sleep(0)
         return b""
+
+    async def readuntil(self, sep: bytes = b"\n") -> bytes:
+        await asyncio.sleep(0)
+        return b""
+
+    async def readexactly(self, n: int) -> bytes:
+        raise AssertionError("readexactly should not be called for small test lines")
 
 
 class _FakeProc:
@@ -130,6 +188,10 @@ async def test_async_run_timeout(monkeypatch, tmp_path) -> None:
     # Process that never finishes stdout (no newline EOF hang)
     class HangStdout:
         async def readline(self) -> bytes:
+            await asyncio.sleep(10)
+            return b""
+
+        async def readuntil(self, sep: bytes = b"\n") -> bytes:
             await asyncio.sleep(10)
             return b""
 
