@@ -139,16 +139,52 @@ async def _stdout_line_event_iter(
         yield line, parse_event_line(line)
 
 
+# Substrings that indicate opencode crashed during SQLite WAL initialisation.
+# This happens when multiple instances race to set journal_mode=WAL before
+# busy_timeout is configured (opencode bug: busy_timeout set after WAL pragma).
+_SQLITE_STARTUP_PATTERNS: tuple[str, ...] = (
+    "database is locked",
+    "sqlite_busy",
+    "sqliteerror",
+    "journal_mode",
+    "disk i/o error",
+)
+
+
+def _is_sqlite_startup_error(stderr: str) -> bool:
+    """Return True when *stderr* looks like an opencode SQLite initialisation crash."""
+    lower = stderr.lower()
+    return any(pat in lower for pat in _SQLITE_STARTUP_PATTERNS)
+
+
 class AsyncOpenCodeClient:
     """
     One-shot async wrapper around the OpenCode CLI.
 
     Uses ``opencode run --format json`` with optional ``OPENCODE_CONFIG_CONTENT``.
+
+    Parameters
+    ----------
+    startup_concurrency:
+        Maximum number of opencode processes that may enter their SQLite
+        initialisation window simultaneously.  Defaults to ``1`` (serialised
+        startup) to avoid the WAL-pragma race that crashes concurrent instances.
+    startup_delay_s:
+        Seconds to hold the startup semaphore *after* the process is spawned,
+        giving SQLite time to finish ``PRAGMA journal_mode = WAL`` before the
+        next instance starts.  Defaults to ``0.3``.
     """
 
-    def __init__(self, binary: str = "opencode") -> None:
+    def __init__(
+        self,
+        binary: str = "opencode",
+        startup_concurrency: int = 1,
+        startup_delay_s: float = 0.3,
+    ) -> None:
         self.binary = binary
         self._resolved_binary: str | None = None
+        self._startup_sem = asyncio.Semaphore(startup_concurrency)
+        self._startup_delay_s = startup_delay_s
 
     def resolved_binary(self) -> str:
         if self._resolved_binary is None:
@@ -163,13 +199,19 @@ class AsyncOpenCodeClient:
         env: dict[str, str],
     ) -> AsyncIterator[tuple[asyncio.subprocess.Process, list[str]]]:
         stderr_lines: list[str] = []
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
+        # Serialise process startup to avoid the SQLite WAL-pragma race.
+        # The semaphore is released as soon as the startup window has elapsed,
+        # so all processes run concurrently after their individual delay.
+        async with self._startup_sem:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            if self._startup_delay_s > 0:
+                await asyncio.sleep(self._startup_delay_s)
         stderr_task = asyncio.create_task(_drain_stderr(proc, stderr_lines))
         try:
             yield proc, stderr_lines
@@ -235,6 +277,8 @@ class AsyncOpenCodeClient:
         run_cfg: RunConfig | None = None,
         timeout_s: float | None = None,
         log_file: str | Path | None = None,
+        max_retries: int = 2,
+        retry_delay_s: float = 1.0,
     ) -> RunResult:
         """
         Run to completion and return a :class:`RunResult`.
@@ -244,6 +288,14 @@ class AsyncOpenCodeClient:
         crashes.
 
         Raises :class:`OpenCodeTimeoutError` if ``timeout_s`` elapses.
+
+        Parameters
+        ----------
+        max_retries:
+            Number of additional attempts when opencode crashes during SQLite
+            startup (WAL-pragma race).  Set to ``0`` to disable retry.
+        retry_delay_s:
+            Seconds to wait between retry attempts.
         """
         run_cfg = run_cfg or RunConfig()
 
@@ -286,11 +338,25 @@ class AsyncOpenCodeClient:
                 stderr=stderr,
             )
 
+        async def _run_with_retries() -> RunResult:
+            last_exc: OpenCodeProcessError | None = None
+            for attempt in range(1 + max_retries):
+                if attempt > 0:
+                    await asyncio.sleep(retry_delay_s)
+                try:
+                    return await _inner()
+                except OpenCodeProcessError as exc:
+                    if attempt < max_retries and _is_sqlite_startup_error(exc.stderr):
+                        last_exc = exc
+                        continue
+                    raise
+            raise last_exc  # type: ignore[misc]  # unreachable; satisfies type checker
+
         if timeout_s is not None:
             try:
-                return await asyncio.wait_for(_inner(), timeout=timeout_s)
+                return await asyncio.wait_for(_run_with_retries(), timeout=timeout_s)
             except asyncio.TimeoutError as e:
                 raise OpenCodeTimeoutError(
                     f"OpenCode run exceeded timeout_s={timeout_s!r}"
                 ) from e
-        return await _inner()
+        return await _run_with_retries()

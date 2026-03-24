@@ -62,13 +62,24 @@ async def stream_example():
 
 ```python
 async def multi():
-    client = AsyncOpenCodeClient()
+    # startup_concurrency=1 serialises SQLite initialisation to avoid a known
+    # WAL-pragma race in opencode when many instances start simultaneously.
+    # startup_delay_s controls how long each slot is held before the next
+    # process is allowed to start (default 0.3 s).
+    client = AsyncOpenCodeClient(startup_concurrency=1, startup_delay_s=0.3)
     ws = Path("/path/to/monorepo")
-    r1, r2 = await asyncio.gather(
-        client.async_run("Explain services/api.", ws / "services" / "api", run_cfg=RunConfig(agent="explore")),
-        client.async_run("Explain packages/ui.", ws / "packages" / "ui", run_cfg=RunConfig(agent="explore")),
-    )
-    return r1, r2
+    results = await asyncio.gather(*[
+        client.async_run(
+            f"Explain services/{svc}.",
+            ws / "services" / svc,
+            run_cfg=RunConfig(agent="explore"),
+            timeout_s=600,
+            # max_retries=2 (default): retry automatically if opencode crashes
+            # during SQLite startup before giving up.
+        )
+        for svc in ["api", "worker", "gateway"]
+    ])
+    return results
 ```
 
 ## Configuration injection
@@ -120,6 +131,16 @@ Per-stage timeouts: `OPENCODE_WEATHER_PER_CITY_TIMEOUT_S`, `OPENCODE_WEATHER_SUM
 | `OPENCODE_ENABLE_EXA` | Passed through / defaulted to `1` in that test for web search tools |
 
 Default `pytest -q` runs **all** tests; use `-m "not integration"` in CI without OpenCode.
+
+## Concurrency notes
+
+When running many tasks with `asyncio.gather`, two mitigations are active by default:
+
+**Startup serialisation** — `AsyncOpenCodeClient` accepts `startup_concurrency` (default `1`) and `startup_delay_s` (default `0.3`). Only one process at a time enters its SQLite initialisation window; all processes run concurrently afterwards. This avoids a known opencode bug where `PRAGMA journal_mode = WAL` races against `PRAGMA busy_timeout` during concurrent startup, causing immediate crashes.
+
+**Automatic retry** — `async_run` accepts `max_retries` (default `2`) and `retry_delay_s` (default `1.0`). If opencode exits non-zero and stderr contains SQLite lock indicators, the call is retried with a short backoff. Non-SQLite failures are raised immediately.
+
+Set `startup_concurrency=0` (unlimited) and `max_retries=0` to opt out of both behaviours.
 
 ## Notes
 

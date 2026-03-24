@@ -8,7 +8,14 @@ from unittest.mock import patch
 
 import pytest
 
-from opencode_wrapper.client import AsyncOpenCodeClient, _readline_unlimited, build_argv, build_env, resolve_binary
+from opencode_wrapper.client import (
+    AsyncOpenCodeClient,
+    _is_sqlite_startup_error,
+    _readline_unlimited,
+    build_argv,
+    build_env,
+    resolve_binary,
+)
 from opencode_wrapper.config import RunConfig
 from opencode_wrapper.errors import OpenCodeBinaryNotFoundError, OpenCodeProcessError, OpenCodeTimeoutError
 
@@ -120,6 +127,22 @@ class _FakeStderr:
     async def readuntil(self, sep: bytes = b"\n") -> bytes:
         await asyncio.sleep(0)
         return b""
+
+    async def readexactly(self, n: int) -> bytes:
+        raise AssertionError("readexactly should not be called for small test lines")
+
+
+class _FakeStderrLines:
+    """Fake stderr that returns a fixed list of lines then EOF."""
+
+    def __init__(self, lines: list[bytes]) -> None:
+        self._q = list(lines)
+
+    async def readuntil(self, sep: bytes = b"\n") -> bytes:
+        await asyncio.sleep(0)
+        if not self._q:
+            return b""
+        return self._q.pop(0)
 
     async def readexactly(self, n: int) -> bytes:
         raise AssertionError("readexactly should not be called for small test lines")
@@ -244,3 +267,164 @@ async def test_async_stream_yields_then_raises_on_bad_exit(monkeypatch, tmp_path
         assert first["type"] == "text"
         with pytest.raises(OpenCodeProcessError):
             await gen.__anext__()
+
+
+# ---------------------------------------------------------------------------
+# _is_sqlite_startup_error
+# ---------------------------------------------------------------------------
+
+
+def test_is_sqlite_startup_error_detects_locked() -> None:
+    assert _is_sqlite_startup_error("SqliteError: database is locked")
+
+
+def test_is_sqlite_startup_error_detects_busy() -> None:
+    assert _is_sqlite_startup_error("error code SQLITE_BUSY returned")
+
+
+def test_is_sqlite_startup_error_detects_journal_mode() -> None:
+    assert _is_sqlite_startup_error("failed to set PRAGMA journal_mode = WAL")
+
+
+def test_is_sqlite_startup_error_detects_disk_io() -> None:
+    assert _is_sqlite_startup_error("SqliteError: disk I/O error")
+
+
+def test_is_sqlite_startup_error_ignores_unrelated() -> None:
+    assert not _is_sqlite_startup_error("Error: file not found")
+    assert not _is_sqlite_startup_error("")
+
+
+# ---------------------------------------------------------------------------
+# startup semaphore serialises process creation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_startup_semaphore_serialises_launches(monkeypatch, tmp_path) -> None:
+    """Concurrent async_run calls must not enter _managed_process simultaneously."""
+    launch_times: list[float] = []
+
+    async def fake_exec(*args, **kwargs):
+        launch_times.append(asyncio.get_event_loop().time())
+        proc = _FakeProc([b'{"type":"text","content":"ok"}\n'])
+        proc.returncode = 0
+        return proc
+
+    client = AsyncOpenCodeClient(
+        binary="opencode",
+        startup_concurrency=1,
+        startup_delay_s=0.05,
+    )
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        await asyncio.gather(
+            client.async_run("a", tmp_path, run_cfg=RunConfig()),
+            client.async_run("b", tmp_path, run_cfg=RunConfig()),
+            client.async_run("c", tmp_path, run_cfg=RunConfig()),
+        )
+
+    assert len(launch_times) == 3
+    # Each launch must be at least startup_delay_s after the previous one.
+    for i in range(1, len(launch_times)):
+        gap = launch_times[i] - launch_times[i - 1]
+        assert gap >= 0.04, f"launch gap {gap:.3f}s too small — semaphore not working"
+
+
+# ---------------------------------------------------------------------------
+# retry on SQLite startup crash
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_run_retries_on_sqlite_error(monkeypatch, tmp_path) -> None:
+    """async_run retries when opencode crashes with a SQLite startup error."""
+    call_count = 0
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First attempt: simulate SQLite startup crash (exits immediately, no stdout)
+            proc = _FakeProc([])
+
+            async def wait_locked():
+                proc.returncode = 1
+                return 1
+
+            proc.wait = wait_locked  # type: ignore[method-assign]
+            proc.stderr = _FakeStderrLines([b"SqliteError: database is locked\n"])
+        else:
+            # Second attempt: success
+            proc = _FakeProc([b'{"type":"text","content":"ok"}\n'])
+            proc.returncode = 0
+        return proc
+
+    client = AsyncOpenCodeClient(binary="opencode", startup_delay_s=0)
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        result = await client.async_run("hi", tmp_path, run_cfg=RunConfig(), retry_delay_s=0)
+
+    assert call_count == 2
+    assert result.final_text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_async_run_does_not_retry_non_sqlite_error(monkeypatch, tmp_path) -> None:
+    """Non-SQLite process errors are raised immediately without retrying."""
+    call_count = 0
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        proc = _FakeProc([])
+
+        async def wait_fail():
+            proc.returncode = 1
+            return 1
+
+        proc.wait = wait_fail  # type: ignore[method-assign]
+        proc.stderr = _FakeStderrLines([b"Error: something else went wrong\n"])
+        return proc
+
+    client = AsyncOpenCodeClient(binary="opencode", startup_delay_s=0)
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        with pytest.raises(OpenCodeProcessError):
+            await client.async_run("hi", tmp_path, run_cfg=RunConfig(), retry_delay_s=0)
+
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_async_run_raises_after_max_retries_exhausted(monkeypatch, tmp_path) -> None:
+    """After max_retries SQLite failures the final error is re-raised."""
+    call_count = 0
+
+    async def fake_exec(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        proc = _FakeProc([])
+
+        async def wait_locked():
+            proc.returncode = 1
+            return 1
+
+        proc.wait = wait_locked  # type: ignore[method-assign]
+        proc.stderr = _FakeStderrLines([b"SqliteError: database is locked\n"])
+        return proc
+
+    client = AsyncOpenCodeClient(binary="opencode", startup_delay_s=0)
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        with pytest.raises(OpenCodeProcessError) as ei:
+            await client.async_run(
+                "hi", tmp_path, run_cfg=RunConfig(), max_retries=2, retry_delay_s=0
+            )
+
+    assert call_count == 3  # 1 initial + 2 retries
+    assert "database is locked" in ei.value.stderr
