@@ -11,6 +11,7 @@ from opencode_wrapper.errors import (
 )
 from opencode_wrapper.events import (
     RunResult,
+    TokenUsage,
     aggregate_run_result,
     parse_event_line,
     run_result_fuzzy_text,
@@ -20,6 +21,7 @@ __all__ = [
     "AsyncOpenCodeClient",
     "RunConfig",
     "RunResult",
+    "TokenUsage",
     "aggregate_run_result",
     "build_argv",
     "build_env",

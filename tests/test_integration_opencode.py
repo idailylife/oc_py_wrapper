@@ -55,6 +55,14 @@ async def test_integration_async_run_minimal_prompt(
         f"expected marker in output; final_text={result.final_text!r} stderr={result.stderr!r}"
     )
 
+    # Token usage / cost / turns populated from step_finish events
+    assert result.turns >= 1, f"expected at least 1 turn, got {result.turns}"
+    assert result.total_cost >= 0, f"expected non-negative cost, got {result.total_cost}"
+    u = result.token_usage
+    assert u.total > 0, f"expected positive total tokens, got {u.total}"
+    assert u.input > 0, f"expected positive input tokens, got {u.input}"
+    assert u.output > 0, f"expected positive output tokens, got {u.output}"
+
 
 @pytest.mark.integration
 @pytest.mark.asyncio

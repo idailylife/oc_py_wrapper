@@ -112,6 +112,18 @@ def _tool_summary(ev: dict[str, Any]) -> dict[str, Any] | None:
 
 
 @dataclass
+class TokenUsage:
+    """Aggregated token counts across all steps."""
+
+    total: int = 0
+    input: int = 0
+    output: int = 0
+    reasoning: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+
+
+@dataclass
 class RunResult:
     """Aggregated outcome of a completed ``opencode run``."""
 
@@ -121,6 +133,9 @@ class RunResult:
     exit_code: int | None = None
     stderr: str = ""
     raw_stdout_lines: list[str] = field(default_factory=list)
+    token_usage: TokenUsage = field(default_factory=TokenUsage)
+    total_cost: float = 0.0
+    turns: int = 0
 
     def append_event(self, ev: dict[str, Any]) -> None:
         self.events.append(ev)
@@ -130,6 +145,34 @@ class RunResult:
         tool = _tool_summary(ev)
         if tool is not None:
             self.tool_calls.append(tool)
+        if ev.get("type") == "step_finish":
+            self._accumulate_step(ev)
+
+    def _accumulate_step(self, ev: dict[str, Any]) -> None:
+        """Extract cost/token/turn info from a ``step_finish`` event."""
+        part = ev.get("part") or ev
+        cost = part.get("cost")
+        if isinstance(cost, (int, float)):
+            self.total_cost += cost
+        tokens = part.get("tokens")
+        if isinstance(tokens, dict):
+            u = self.token_usage
+            for attr, key in (
+                ("total", "total"),
+                ("input", "input"),
+                ("output", "output"),
+                ("reasoning", "reasoning"),
+            ):
+                val = tokens.get(key)
+                if isinstance(val, (int, float)):
+                    setattr(u, attr, getattr(u, attr) + int(val))
+            cache = tokens.get("cache")
+            if isinstance(cache, dict):
+                for attr, key in (("cache_read", "read"), ("cache_write", "write")):
+                    val = cache.get(key)
+                    if isinstance(val, (int, float)):
+                        setattr(u, attr, getattr(u, attr) + int(val))
+        self.turns += 1
 
 
 def aggregate_run_result(
