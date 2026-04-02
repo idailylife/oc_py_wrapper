@@ -1,6 +1,6 @@
 [project]
 name = "py-opencode-wrapper"
-version = "0.1.1"
+version = "0.1.2"
 description = "Async Python wrapper for OpenCode CLI (opencode run --format json)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,11 @@ markers = [
     "integration: requires real opencode CLI and configured provider (network/API; slow)",
     "multi_agent_weather: 11-call weather workflow; enable with OPENCODE_MULTI_AGENT_WEATHER=1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/idailylife/oc_py_wrapper"
+Repository = "https://github.com/idailylife/oc_py_wrapper"
+Issues = "https://github.com/idailylife/oc_py_wrapper/issues"
 
 [build-system]
 requires = ["setuptools>=61"]
