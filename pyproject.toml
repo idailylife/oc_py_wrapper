@@ -1,5 +1,5 @@
 [project]
-name = "oc-py-harness"
+name = "py-opencode-wrapper"
 version = "0.1.1"
 description = "Async Python wrapper for OpenCode CLI (opencode run --format json)"
 readme = "README.md"
@@ -23,4 +23,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["opencode_wrapper*", "benchmark*"]
+include = ["opencode_wrapper*"]
