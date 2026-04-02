@@ -1,6 +1,6 @@
 [project]
 name = "oc-py-harness"
-version = "0.1.0"
+version = "0.1.1"
 description = "Async Python wrapper for OpenCode CLI (opencode run --format json)"
 readme = "README.md"
 requires-python = ">=3.10"

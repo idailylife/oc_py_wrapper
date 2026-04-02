@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
@@ -173,6 +174,13 @@ class AsyncOpenCodeClient:
         Seconds to hold the startup semaphore *after* the process is spawned,
         giving SQLite time to finish ``PRAGMA journal_mode = WAL`` before the
         next instance starts.  Defaults to ``0.3``.
+    isolate_db:
+        If ``True`` (default), each run gets a private ``XDG_DATA_HOME`` temp
+        directory so opencode stores its SQLite database in isolation.  Without
+        this, concurrent processes share ``~/.local/share/opencode/opencode.db``
+        and SQLite write locks during tool execution serialize otherwise-parallel
+        runs (observed 37–46 s delays).  Set to ``False`` only if you need runs
+        to share session history.
     """
 
     def __init__(
@@ -180,11 +188,13 @@ class AsyncOpenCodeClient:
         binary: str = "opencode",
         startup_concurrency: int = 1,
         startup_delay_s: float = 0.3,
+        isolate_db: bool = True,
     ) -> None:
         self.binary = binary
         self._resolved_binary: str | None = None
         self._startup_sem = asyncio.Semaphore(startup_concurrency)
         self._startup_delay_s = startup_delay_s
+        self._isolate_db = isolate_db
 
     def resolved_binary(self) -> str:
         if self._resolved_binary is None:
@@ -199,6 +209,14 @@ class AsyncOpenCodeClient:
         env: dict[str, str],
     ) -> AsyncIterator[tuple[asyncio.subprocess.Process, list[str]]]:
         stderr_lines: list[str] = []
+        # Give each process its own XDG_DATA_HOME so opencode.db is isolated.
+        # Without this, all concurrent processes share ~/.local/share/opencode/opencode.db
+        # and SQLite write locks during tool execution serialize the runs (37–46s delays).
+        if self._isolate_db:
+            xdg_tmpdir = tempfile.mkdtemp(prefix="oc_xdg_")
+            env = {**env, "XDG_DATA_HOME": xdg_tmpdir}
+        else:
+            xdg_tmpdir = None
         # Serialise process startup to avoid the SQLite WAL-pragma race.
         # The semaphore is released as soon as the startup window has elapsed,
         # so all processes run concurrently after their individual delay.
@@ -229,6 +247,8 @@ class AsyncOpenCodeClient:
                 await stderr_task
             except asyncio.CancelledError:
                 pass
+            if xdg_tmpdir is not None:
+                shutil.rmtree(xdg_tmpdir, ignore_errors=True)
 
     async def async_stream(
         self,
