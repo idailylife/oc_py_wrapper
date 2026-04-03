@@ -214,6 +214,16 @@ class AsyncOpenCodeClient:
         # and SQLite write locks during tool execution serialize the runs (37–46s delays).
         if self._isolate_db:
             xdg_tmpdir = tempfile.mkdtemp(prefix="oc_xdg_")
+            # Symlink auth.json so provider API keys (stored by `opencode auth`)
+            # are visible in the isolated data dir.  Without this, providers
+            # that rely on auth.json (rather than env-var keys) fail with
+            # "Model not found" because the provider never activates.
+            real_xdg = env.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            real_auth = Path(real_xdg) / "opencode" / "auth.json"
+            if real_auth.is_file():
+                iso_oc_dir = Path(xdg_tmpdir) / "opencode"
+                iso_oc_dir.mkdir(parents=True, exist_ok=True)
+                (iso_oc_dir / "auth.json").symlink_to(real_auth)
             env = {**env, "XDG_DATA_HOME": xdg_tmpdir}
         else:
             xdg_tmpdir = None
