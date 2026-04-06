@@ -55,6 +55,7 @@ class RunConfig:
     permission: PermissionMap | None = None
     mcp: dict[str, Any] | None = None
     tools: dict[str, Any] | None = None
+    instructions: list[str] | None = None
     config_overrides: dict[str, Any] | None = None
 
     def build_opencode_config_dict(self) -> dict[str, Any]:
@@ -68,6 +69,8 @@ class RunConfig:
             merged = _deep_merge(merged, {"mcp": dict(self.mcp)})
         if self.tools is not None:
             merged = _deep_merge(merged, {"tools": dict(self.tools)})
+        if self.instructions is not None:
+            merged = _deep_merge(merged, {"instructions": list(self.instructions)})
         return merged
 
     def opencode_config_content_json(self) -> str | None:
