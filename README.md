@@ -88,12 +88,13 @@ Per-call JSON is merged and passed as `OPENCODE_CONFIG_CONTENT` (see [OpenCode c
 
 | Field | Purpose |
 |--------|---------|
-| `permission` | `permission` map (`allow` / `ask` / `deny`, patterns) |
+| `permission` | `permission` map (`allow` / `deny`, patterns) |
 | `mcp` | MCP server definitions |
 | `tools` | Enable/disable tools (including MCP globs) |
 | `config_overrides` | Any extra top-level config keys to deep-merge |
 
 Optional env tuning: `disable_autoupdate=True` sets `OPENCODE_DISABLE_AUTOUPDATE=1`.
+Note: `ask` is intentionally rejected in subprocess mode (no interactive terminal); use `allow` or `deny`.
 
 ## CLI arguments
 
@@ -134,13 +135,15 @@ Default `pytest -q` runs **all** tests; use `-m "not integration"` in CI without
 
 ## Concurrency notes
 
-When running many tasks with `asyncio.gather`, two mitigations are active by default:
+When running many tasks with `asyncio.gather`, three protections are enabled by default:
 
-**Startup serialisation** — `AsyncOpenCodeClient` accepts `startup_concurrency` (default `1`) and `startup_delay_s` (default `0.3`). Only one process at a time enters its SQLite initialisation window; all processes run concurrently afterwards. This avoids a known opencode bug where `PRAGMA journal_mode = WAL` races against `PRAGMA busy_timeout` during concurrent startup, causing immediate crashes.
+**Startup serialisation** — `startup_concurrency=1` and `startup_delay_s=0.3` limit how many processes enter SQLite startup at once, reducing WAL-initialisation race crashes.
 
-**Automatic retry** — `async_run` accepts `max_retries` (default `2`) and `retry_delay_s` (default `1.0`). If opencode exits non-zero and stderr contains SQLite lock indicators, the call is retried with a short backoff. Non-SQLite failures are raised immediately.
+**DB isolation** — `isolate_db=True` gives each run a private `XDG_DATA_HOME`, so concurrent runs do not contend on the same `opencode.db` during tool execution.
 
-Set `startup_concurrency=0` (unlimited) and `max_retries=0` to opt out of both behaviours.
+**Automatic retry** — `async_run(max_retries=2, retry_delay_s=1.0)` retries known SQLite-startup crashes with short backoff. Non-SQLite failures still fail fast.
+
+Set `startup_concurrency=0`, `isolate_db=False`, and `max_retries=0` to opt out.
 
 ## Notes
 
