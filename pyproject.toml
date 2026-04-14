@@ -1,9 +1,9 @@
 [project]
 name = "py-opencode-wrapper"
-version = "0.1.4"
+version = "0.1.5"
 description = "Async Python wrapper for OpenCode CLI (opencode run --format json)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 dependencies = []
 
 [project.optional-dependencies]

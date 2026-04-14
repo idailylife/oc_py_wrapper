@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping
 
 # Permission values accepted by OpenCode
 PermissionAction = str  # "allow" | "ask" | "deny"
 
 # Nested permission maps: tool name -> action or pattern -> action
-PermissionMap = dict[str, Any]
+PermissionMap = Dict[str, Any]
 
 
 def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
