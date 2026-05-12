@@ -91,10 +91,28 @@ Per-call JSON is merged and passed as `OPENCODE_CONFIG_CONTENT` (see [OpenCode c
 | `permission` | `permission` map (`allow` / `deny`, patterns) |
 | `mcp` | MCP server definitions |
 | `tools` | Enable/disable tools (including MCP globs) |
+| `instructions` | Instruction file paths / glob patterns to inject |
 | `config_overrides` | Any extra top-level config keys to deep-merge |
 
 Optional env tuning: `disable_autoupdate=True` sets `OPENCODE_DISABLE_AUTOUPDATE=1`.
 Note: `ask` is intentionally rejected in subprocess mode (no interactive terminal); use `allow` or `deny`.
+
+### User config isolation
+
+By default, `RunConfig.inherit_user_config=False` makes each child `opencode`
+process see a sanitized copy of the host's global OpenCode config. The wrapper
+keeps only provider-selection keys (`$schema`, `provider`,
+`disabled_providers`, `enabled_providers`) and drops capability/configuration
+keys such as `mcp`, `agent`, `command`, `tools`, `plugin`, `skills`,
+`instructions`, `permission`, and `model`.
+
+This keeps benchmark and orchestration runs reproducible while still allowing
+provider configuration and `opencode auth` credentials to work. Project-level
+config discovered from the workspace is not suppressed.
+
+Set `inherit_user_config=True` to restore the legacy behavior of inheriting the
+host OpenCode config as-is. For reproducible runs, pass `model`, `permission`,
+`mcp`, `tools`, and `instructions` explicitly through `RunConfig`.
 
 ## CLI arguments
 
