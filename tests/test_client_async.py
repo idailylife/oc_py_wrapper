@@ -57,6 +57,23 @@ def test_build_env_config_content_and_autoupdate() -> None:
     assert env.get("OPENCODE_DISABLE_AUTOUPDATE") == "1"
 
 
+def test_build_env_sets_pwd_to_cwd() -> None:
+    """opencode's run.ts:276 reads `process.env.PWD ?? process.cwd()` to
+    resolve the project root, and the bash builtin pwd reads $PWD.
+    asyncio.create_subprocess_exec(cwd=...) only chdirs the child; PWD stays
+    inherited from the parent shell.  build_env must pin PWD to the workspace
+    so opencode and bash both see a consistent cwd."""
+    cfg = RunConfig()
+    env = build_env(cfg, base={"HOME": "/tmp", "PWD": "/some/other/dir"}, cwd="/ws/x")
+    assert env["PWD"] == "/ws/x"
+
+
+def test_build_env_without_cwd_leaves_pwd_untouched() -> None:
+    cfg = RunConfig()
+    env = build_env(cfg, base={"HOME": "/tmp", "PWD": "/parent"})
+    assert env["PWD"] == "/parent"
+
+
 @pytest.mark.asyncio
 async def test_readline_unlimited_normal_line() -> None:
     """Lines within the default 64 KiB limit are returned as-is."""

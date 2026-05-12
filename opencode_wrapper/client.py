@@ -81,7 +81,12 @@ def build_argv(
     return cmd
 
 
-def build_env(run_cfg: RunConfig, base: Mapping[str, str] | None = None) -> dict[str, str]:
+def build_env(
+    run_cfg: RunConfig,
+    base: Mapping[str, str] | None = None,
+    *,
+    cwd: str | Path | None = None,
+) -> dict[str, str]:
     env = dict(base if base is not None else os.environ)
     if run_cfg.extra_env:
         env.update(dict(run_cfg.extra_env))
@@ -90,6 +95,14 @@ def build_env(run_cfg: RunConfig, base: Mapping[str, str] | None = None) -> dict
         env["OPENCODE_CONFIG_CONTENT"] = content
     if run_cfg.disable_autoupdate:
         env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+    # opencode's `run` cmd resolves the project root as
+    # `process.env.PWD ?? process.cwd()` (run.ts:276), and the bash builtin
+    # `pwd` reads $PWD too.  asyncio.create_subprocess_exec(cwd=...) only
+    # chdirs the child; it leaves PWD inherited from the parent shell, which
+    # makes opencode operate against the wrong directory.  Pin PWD to the
+    # resolved workspace so the child sees a consistent cwd.
+    if cwd is not None:
+        env["PWD"] = str(cwd)
     return env
 
 
@@ -380,8 +393,8 @@ class AsyncOpenCodeClient:
         validate_config_for_run(run_cfg)
         bin_path = self.resolved_binary()
         argv = build_argv(bin_path, prompt, run_cfg)
-        env = build_env(run_cfg)
         cwd = str(Path(workspace).expanduser().resolve())
+        env = build_env(run_cfg, cwd=cwd)
 
         events_acc: list[dict[str, Any]] = []
         raw_acc: list[str] = []
@@ -436,8 +449,8 @@ class AsyncOpenCodeClient:
             validate_config_for_run(run_cfg)
             bin_path = self.resolved_binary()
             argv = build_argv(bin_path, prompt, run_cfg)
-            env = build_env(run_cfg)
             cwd = str(Path(workspace).expanduser().resolve())
+            env = build_env(run_cfg, cwd=cwd)
 
             events_acc: list[dict[str, Any]] = []
             raw_acc: list[str] = []
