@@ -41,6 +41,7 @@ The wrapper lives in `opencode_wrapper/` with four modules:
 
 - **Zero runtime deps**: stdlib-only (`asyncio`, `json`, `shutil`, `dataclasses`). Test deps are optional.
 - **Config via env var**: `RunConfig` serializes to `OPENCODE_CONFIG_CONTENT` JSON rather than writing temp config files.
+- **Hermetic by default**: `RunConfig.inherit_user_config` defaults to `False`. The wrapper redirects `XDG_CONFIG_HOME` and `OPENCODE_TEST_HOME` at a sanitized tmpdir copy of the host's global opencode config, keeping only `provider` / `disabled_providers` / `enabled_providers` / `$schema` and dropping everything else (`mcp`, `agent`, `command`, `tools`, `plugin`, `skills`, `instructions`, `permission`, `model`, ...). Project-level config (cwd walk + `.opencode/`) and `auth.json` are untouched. Set `inherit_user_config=True` to restore the legacy "inherit everything" behavior. Benchmark callers must pin `model` explicitly.
 - **Fault-tolerant parsing**: Non-JSON stdout lines become diagnostic events instead of raising errors, so partial or malformed output never breaks the event stream.
 - **pytest-asyncio `auto` mode**: All async test functions are automatically treated as async tests (configured in `pyproject.toml`).
 
@@ -57,3 +58,5 @@ The wrapper lives in `opencode_wrapper/` with four modules:
 | `OPENCODE_INTEGRATION=0` | Skip integration tests |
 | `OPENCODE_INTEGRATION_TIMEOUT_S` | Per-test timeout (default 300s) |
 | `OPENCODE_MULTI_AGENT_WEATHER=1` | Enable multi-agent weather test |
+
+Env vars set by the wrapper on the child process (informational): `XDG_DATA_HOME` (when `isolate_db=True`, the default), `XDG_CONFIG_HOME` + `OPENCODE_TEST_HOME` (when `inherit_user_config=False`, the default), `OPENCODE_CONFIG_CONTENT` (whenever `RunConfig` has any of `permission` / `mcp` / `tools` / `instructions` / `config_overrides`), `OPENCODE_DISABLE_AUTOUPDATE=1` (when `disable_autoupdate=True`). Under hermetic mode the wrapper also strips inherited `OPENCODE_CONFIG` and `OPENCODE_CONFIG_DIR`. macOS MDM `.mobileconfig` and remote org config (`/.well-known/opencode`) are NOT suppressed.

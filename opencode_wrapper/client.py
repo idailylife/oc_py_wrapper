@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
 
 from opencode_wrapper.config import RunConfig, validate_config_for_run
+from opencode_wrapper.config import loads_jsonc, sanitize_user_config_json
 from opencode_wrapper.errors import (
     OpenCodeBinaryNotFoundError,
     OpenCodeProcessError,
@@ -158,6 +160,96 @@ def _is_sqlite_startup_error(stderr: str) -> bool:
     return any(pat in lower for pat in _SQLITE_STARTUP_PATTERNS)
 
 
+_LOG = logging.getLogger(__name__)
+
+# Filenames opencode reads from its global config dir + ~/.opencode.
+# Legacy TOML ("config" without extension) is intentionally skipped — it's rare
+# and would require a TOML parser dep; the wrapper aims for stdlib-only.
+_GLOBAL_CONFIG_FILENAMES: tuple[str, ...] = (
+    "config.json",
+    "opencode.json",
+    "opencode.jsonc",
+)
+
+
+def _resolve_real_xdg_config_opencode_dir(env: Mapping[str, str]) -> Path:
+    xdg = env.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path(env.get("HOME", str(Path.home()))).expanduser() / ".config"
+    return base / "opencode"
+
+
+def _resolve_real_home_opencode_dir(env: Mapping[str, str]) -> Path:
+    return Path(env.get("HOME", str(Path.home()))).expanduser() / ".opencode"
+
+
+def _sanitize_and_copy(src_dir: Path, dst_dir: Path) -> None:
+    """Read each known opencode config file in *src_dir*, sanitize, write to *dst_dir*.
+
+    Strict JSON files parse on the fast path; JSONC (comments, trailing commas)
+    falls back to ``loads_jsonc``.  Files that aren't valid in either form are
+    skipped with a warning — for benchmark reproducibility the wrapper would
+    rather hide a file it can't safely strip than risk leaking capability keys.
+    Missing source files are silently skipped.  ``dst_dir`` is always created
+    so opencode finds the directory (even if empty).
+    """
+    from opencode_wrapper.config import sanitize_user_config_json
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    if not src_dir.is_dir():
+        return
+    for fname in _GLOBAL_CONFIG_FILENAMES:
+        src = src_dir / fname
+        if not src.is_file():
+            continue
+        try:
+            text = src.read_text(encoding="utf-8")
+        except OSError as exc:
+            _LOG.warning("user-config isolation: cannot read %s: %s", src, exc)
+            continue
+        try:
+            raw = loads_jsonc(text)
+        except json.JSONDecodeError as exc:
+            _LOG.warning(
+                "user-config isolation: skipping %s (not parseable as JSON or JSONC): %s",
+                src, exc,
+            )
+            continue
+        if not isinstance(raw, dict):
+            _LOG.warning(
+                "user-config isolation: skipping %s (root is not a JSON object)", src
+            )
+            continue
+        sanitized = sanitize_user_config_json(raw)
+        (dst_dir / fname).write_text(
+            json.dumps(sanitized, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def _isolate_user_config(env: dict[str, str], tmp_root: Path) -> dict[str, str]:
+    """Mutate *env* so opencode sees a sanitized copy of the user's global config.
+
+    Reads the real ``$XDG_CONFIG_HOME/opencode`` and ``$HOME/.opencode``,
+    filters each file through ``sanitize_user_config_json`` (keeping only
+    ``provider`` / ``disabled_providers`` / ``enabled_providers`` / ``$schema``),
+    writes the results under *tmp_root*, and points ``XDG_CONFIG_HOME`` /
+    ``OPENCODE_TEST_HOME`` at those tmpdir locations.  Strips
+    ``OPENCODE_CONFIG`` / ``OPENCODE_CONFIG_DIR`` so the parent shell can't
+    re-introduce extras.  Project-level config (cwd walk + ``.opencode/``)
+    is untouched.
+    """
+    iso_xdg = tmp_root / "xdg"
+    iso_home = tmp_root / "home"
+
+    _sanitize_and_copy(_resolve_real_xdg_config_opencode_dir(env), iso_xdg / "opencode")
+    _sanitize_and_copy(_resolve_real_home_opencode_dir(env), iso_home / ".opencode")
+
+    env["XDG_CONFIG_HOME"] = str(iso_xdg)
+    env["OPENCODE_TEST_HOME"] = str(iso_home)
+    env.pop("OPENCODE_CONFIG", None)
+    env.pop("OPENCODE_CONFIG_DIR", None)
+    return env
+
+
 class AsyncOpenCodeClient:
     """
     One-shot async wrapper around the OpenCode CLI.
@@ -207,13 +299,16 @@ class AsyncOpenCodeClient:
         argv: list[str],
         cwd: str,
         env: dict[str, str],
+        run_cfg: RunConfig,
     ) -> AsyncIterator[tuple[asyncio.subprocess.Process, list[str]]]:
         stderr_lines: list[str] = []
+        cleanup_tmpdirs: list[str] = []
         # Give each process its own XDG_DATA_HOME so opencode.db is isolated.
         # Without this, all concurrent processes share ~/.local/share/opencode/opencode.db
         # and SQLite write locks during tool execution serialize the runs (37–46s delays).
         if self._isolate_db:
             xdg_tmpdir = tempfile.mkdtemp(prefix="oc_xdg_")
+            cleanup_tmpdirs.append(xdg_tmpdir)
             # Symlink auth.json so provider API keys (stored by `opencode auth`)
             # are visible in the isolated data dir.  Without this, providers
             # that rely on auth.json (rather than env-var keys) fail with
@@ -225,8 +320,16 @@ class AsyncOpenCodeClient:
                 iso_oc_dir.mkdir(parents=True, exist_ok=True)
                 (iso_oc_dir / "auth.json").symlink_to(real_auth)
             env = {**env, "XDG_DATA_HOME": xdg_tmpdir}
-        else:
-            xdg_tmpdir = None
+        # When the caller has not opted into host-config inheritance (the
+        # default), redirect XDG_CONFIG_HOME / OPENCODE_TEST_HOME at a sanitized
+        # tmpdir copy of the user's global config — only provider settings are
+        # carried over, all capability keys (mcp / agent / command / tools /
+        # plugin / skills / instructions / permission / model / ...) are stripped.
+        # Project-level config (cwd walk + .opencode/) is untouched.
+        if not run_cfg.inherit_user_config:
+            cfg_tmpdir = tempfile.mkdtemp(prefix="oc_cfg_")
+            cleanup_tmpdirs.append(cfg_tmpdir)
+            env = _isolate_user_config(dict(env), Path(cfg_tmpdir))
         # Serialise process startup to avoid the SQLite WAL-pragma race.
         # The semaphore is released as soon as the startup window has elapsed,
         # so all processes run concurrently after their individual delay.
@@ -257,8 +360,8 @@ class AsyncOpenCodeClient:
                 await stderr_task
             except asyncio.CancelledError:
                 pass
-            if xdg_tmpdir is not None:
-                shutil.rmtree(xdg_tmpdir, ignore_errors=True)
+            for path in cleanup_tmpdirs:
+                shutil.rmtree(path, ignore_errors=True)
 
     async def async_stream(
         self,
@@ -283,7 +386,7 @@ class AsyncOpenCodeClient:
         events_acc: list[dict[str, Any]] = []
         raw_acc: list[str] = []
 
-        async with self._managed_process(argv, cwd, env) as (proc, stderr_lines):
+        async with self._managed_process(argv, cwd, env, run_cfg) as (proc, stderr_lines):
             async for line, ev in _stdout_line_event_iter(proc):
                 raw_acc.append(line)
                 events_acc.append(ev)
@@ -341,7 +444,7 @@ class AsyncOpenCodeClient:
 
             log_fh = open(log_file, "w") if log_file is not None else None
             try:
-                async with self._managed_process(argv, cwd, env) as (proc, stderr_lines):
+                async with self._managed_process(argv, cwd, env, run_cfg) as (proc, stderr_lines):
                     async for line, ev in _stdout_line_event_iter(proc):
                         raw_acc.append(line)
                         events_acc.append(ev)
