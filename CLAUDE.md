@@ -28,6 +28,44 @@ pytest -m integration -q tests/test_integration_opencode.py
 OPENCODE_MULTI_AGENT_WEATHER=1 pytest -m integration -v tests/test_integration_multi_agent_weather.py
 ```
 
+## Releasing
+
+GitHub remote: `idailylife/oc_py_wrapper`. Releases are tagged + built locally and published with `gh`; PyPI publish is automated via GitHub Actions on the `release: published` event using PyPI Trusted Publishers (OIDC — no API token). `dist/` is gitignored.
+
+### One-time PyPI setup
+
+Configure a trusted publisher on PyPI:
+
+1. https://pypi.org/manage/account/publishing/ → add a **pending** publisher (before the package exists on PyPI) or open the existing project's *Publishing* tab.
+2. Fields:
+   - PyPI project name: `py-opencode-wrapper`
+   - Owner: `idailylife`
+   - Repository: `oc_py_wrapper`
+   - Workflow filename: `release.yml`
+   - Environment name: `pypi`
+3. On GitHub, create an environment named `pypi` (repo → Settings → Environments). No secrets needed.
+
+### Cutting a release
+
+```bash
+# 1. Bump version in pyproject.toml (X.Y.Z) and commit
+# 2. Build wheel + sdist locally (sanity check; CI rebuilds these)
+python -m build
+
+# 3. Tag and push
+git tag vX.Y.Z
+git push origin main vX.Y.Z
+
+# 4. Create the GitHub release with the dist artifacts attached
+gh release create vX.Y.Z \
+  dist/py_opencode_wrapper-X.Y.Z-py3-none-any.whl \
+  dist/py_opencode_wrapper-X.Y.Z.tar.gz \
+  --title "vX.Y.Z — <short summary>" \
+  --notes "<release notes>"
+```
+
+Publishing the release fires `.github/workflows/release.yml`, which rebuilds the artifacts in CI and uploads them to PyPI via OIDC. `gh` must already be authenticated (`gh auth status`).
+
 ## Architecture
 
 The wrapper lives in `opencode_wrapper/` with four modules:
