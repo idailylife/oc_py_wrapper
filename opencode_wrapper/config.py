@@ -147,6 +147,10 @@ class RunConfig:
     remote_dir: str | None = None
     port: int | None = None
     variant: str | None = None
+    # Include OpenCode reasoning/thinking parts in the JSON event stream.
+    # This maps to `opencode run --thinking`; it does not set model reasoning effort.
+    record_thinking: bool | None = None
+    # Backward-compatible alias for record_thinking.
     thinking: bool | None = None
     print_logs: bool | None = None
     log_level: str | None = None

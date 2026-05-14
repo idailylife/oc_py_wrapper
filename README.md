@@ -48,6 +48,12 @@ async def main():
 asyncio.run(main())
 ```
 
+Set `RunConfig(record_thinking=True)` when you want OpenCode reasoning/thinking
+parts included in `result.events` and `log_file` JSON lines. This only maps to
+OpenCode's display/output flag `--thinking`; it does not change model reasoning
+effort. Use `variant` separately if you intentionally want a provider-specific
+reasoning effort.
+
 ### Stream structured JSON events
 
 ```python

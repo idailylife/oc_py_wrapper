@@ -73,7 +73,7 @@ def build_argv(
         cmd.extend(["--port", str(run_cfg.port)])
     if run_cfg.variant:
         cmd.extend(["--variant", run_cfg.variant])
-    if run_cfg.thinking is True:
+    if run_cfg.record_thinking is True or run_cfg.thinking is True:
         cmd.append("--thinking")
 
     if prompt:

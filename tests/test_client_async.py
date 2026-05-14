@@ -49,6 +49,19 @@ def test_build_argv_with_agent_model_files() -> None:
     assert "-f" in argv
 
 
+def test_build_argv_record_thinking_adds_display_flag_only() -> None:
+    cfg = RunConfig(record_thinking=True)
+    argv = build_argv("/x/opencode", "p", cfg)
+    assert "--thinking" in argv
+    assert "--variant" not in argv
+
+
+def test_build_argv_thinking_alias_still_adds_display_flag() -> None:
+    cfg = RunConfig(thinking=True)
+    argv = build_argv("/x/opencode", "p", cfg)
+    assert "--thinking" in argv
+
+
 def test_build_env_config_content_and_autoupdate() -> None:
     cfg = RunConfig(permission={"bash": "deny"}, disable_autoupdate=True)
     env = build_env(cfg, base={"HOME": "/tmp"})
