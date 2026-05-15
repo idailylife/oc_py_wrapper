@@ -4,10 +4,24 @@ Python **async** wrapper around the [OpenCode](https://opencode.ai/docs/) CLI (`
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.8+
 - `opencode` on `PATH` (or pass an absolute path to the binary)
 
-## Install (local tree)
+## Install
+
+From PyPI (most users):
+
+```bash
+pip install py-opencode-wrapper
+```
+
+The distribution name on PyPI is `py-opencode-wrapper`; import it as `opencode_wrapper`:
+
+```python
+from opencode_wrapper import AsyncOpenCodeClient, RunConfig
+```
+
+For local development (editable install with test deps):
 
 ```bash
 pip install -e ".[dev]"
@@ -68,11 +82,7 @@ async def stream_example():
 
 ```python
 async def multi():
-    # startup_concurrency=1 serialises SQLite initialisation to avoid a known
-    # WAL-pragma race in opencode when many instances start simultaneously.
-    # startup_delay_s controls how long each slot is held before the next
-    # process is allowed to start (default 0.3 s).
-    client = AsyncOpenCodeClient(startup_concurrency=1, startup_delay_s=0.3)
+    client = AsyncOpenCodeClient()
     ws = Path("/path/to/monorepo")
     results = await asyncio.gather(*[
         client.async_run(
@@ -80,13 +90,13 @@ async def multi():
             ws / "services" / svc,
             run_cfg=RunConfig(agent="explore"),
             timeout_s=600,
-            # max_retries=2 (default): retry automatically if opencode crashes
-            # during SQLite startup before giving up.
         )
         for svc in ["api", "worker", "gateway"]
     ])
     return results
 ```
+
+Safe defaults for parallel runs (startup serialisation, private SQLite DB per run, and automatic retry on SQLite-startup crashes) are enabled out of the box — most users don't need to tune them. See *Concurrency notes* below if you want to.
 
 ## Configuration injection
 
@@ -159,15 +169,13 @@ Default `pytest -q` runs **all** tests; use `-m "not integration"` in CI without
 
 ## Concurrency notes
 
-When running many tasks with `asyncio.gather`, three protections are enabled by default:
+The defaults already handle the common pitfalls when running many `async_run` calls in parallel — you usually don't need to touch any of these.
 
-**Startup serialisation** — `startup_concurrency=1` and `startup_delay_s=0.3` limit how many processes enter SQLite startup at once, reducing WAL-initialisation race crashes.
+- **Startup serialisation** (`startup_concurrency=1`, `startup_delay_s=0.3`) — spaces out SQLite WAL initialisation across processes to avoid a startup race in `opencode`.
+- **DB isolation** (`isolate_db=True`) — each run gets its own `XDG_DATA_HOME`, so concurrent runs don't share `opencode.db` and serialise on SQLite write locks during tool execution.
+- **Automatic retry** (`async_run(max_retries=2, retry_delay_s=1.0)`) — retries known SQLite-startup crashes with short backoff. Non-SQLite failures still fail fast.
 
-**DB isolation** — `isolate_db=True` gives each run a private `XDG_DATA_HOME`, so concurrent runs do not contend on the same `opencode.db` during tool execution.
-
-**Automatic retry** — `async_run(max_retries=2, retry_delay_s=1.0)` retries known SQLite-startup crashes with short backoff. Non-SQLite failures still fail fast.
-
-Set `startup_concurrency=0`, `isolate_db=False`, and `max_retries=0` to opt out.
+To opt out: pass `startup_delay_s=0` (and a large `startup_concurrency`) to drop the startup pacing, `isolate_db=False` to share session history across runs, and `max_retries=0` to disable retries.
 
 ## Notes
 
