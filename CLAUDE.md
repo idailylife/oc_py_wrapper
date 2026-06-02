@@ -72,8 +72,23 @@ The wrapper lives in `opencode_wrapper/` with four modules:
 
 - **`client.py`** — `AsyncOpenCodeClient` spawns `opencode run --format json` as a subprocess. Two main methods: `async_run()` (returns aggregated `RunResult`) and `async_stream()` (yields parsed event dicts). Helper functions `build_argv()` and `build_env()` construct the CLI invocation.
 - **`config.py`** — `RunConfig` dataclass maps to CLI flags and `OPENCODE_CONFIG_CONTENT` env var (JSON). Config is injected per-call via deep-merge of `permission`, `mcp`, `tools`, and `config_overrides` fields.
-- **`events.py`** — `parse_event_line()` handles JSON stdout lines; non-JSON lines become `diagnostic` events so the stream never breaks. `RunResult` aggregates events, extracted text, and tool call summaries. `run_result_fuzzy_text()` does best-effort text extraction across varying event shapes.
+- **`events.py`** — `parse_event_line()` handles JSON stdout lines; non-JSON lines become `diagnostic` events so the stream never breaks. `RunResult` aggregates events, extracted text, tool call summaries, and the opencode `session_id`. `run_result_fuzzy_text()` does best-effort text extraction across varying event shapes.
+- **`session.py`** — `OpenCodeSession`, a stateful multi-turn conversation. See "Multi-turn sessions" below.
 - **`errors.py`** — Exception hierarchy rooted at `OpenCodeError`. `OpenCodeProcessError` captures exit code, stderr, events, and raw stdout for debugging.
+
+### Multi-turn sessions
+
+`OpenCodeSession(client, workspace, run_cfg=...)` is an async context manager for multi-turn chat over one opencode session:
+
+```python
+async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle")) as s:
+    r1 = await s.send("My name is Bob.")
+    r2 = await s.send("What is my name?")   # auto-continues → "Bob"
+    print(s.session_id)
+```
+
+On enter it allocates a private, persistent `XDG_DATA_HOME` tmpdir (`oc_session_*`) passed to every turn via the `async_run(..., data_home=...)` param. The first `send()` creates the opencode session (id captured from `RunResult.session_id`); later turns inject `--session <id>`. This keeps the SQLite session DB alive across turns *without* sharing the global DB — each session is an island, so there is no cross-session lock contention. The tmpdir is removed on context exit. Works regardless of the client's `isolate_db` setting (`data_home` takes over the data-dir branch in `_managed_process`).
+
 
 ## Key Design Decisions
 

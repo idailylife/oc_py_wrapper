@@ -1,4 +1,4 @@
-# oc-py-harness
+# py-opencode-wrapper
 
 Python **async** wrapper around the [OpenCode](https://opencode.ai/docs/) CLI (`opencode run --format json`). Intended as a subprocess-based executor for **multi-agent workflow** orchestration.
 
@@ -40,7 +40,7 @@ from opencode_wrapper import AsyncOpenCodeClient, RunConfig
 async def main():
     client = AsyncOpenCodeClient("opencode")
     cfg = RunConfig(
-        model="anthropic/claude-sonnet-4-5",
+        model="opencode/big-pickle",
         agent="plan",
         permission={"bash": "deny", "edit": "deny"},
         mcp={
@@ -67,6 +67,34 @@ parts included in `result.events` and `log_file` JSON lines. This only maps to
 OpenCode's display/output flag `--thinking`; it does not change model reasoning
 effort. Use `variant` separately if you intentionally want a provider-specific
 reasoning effort.
+
+### Multi-turn conversation (`OpenCodeSession`)
+
+For a stateful, multi-turn chat over a single opencode session, use
+`OpenCodeSession` as an async context manager. Each `send()` continues the same
+session, so the model retains context across turns:
+
+```python
+import asyncio
+from opencode_wrapper import AsyncOpenCodeClient, OpenCodeSession, RunConfig
+
+async def chat():
+    client = AsyncOpenCodeClient()
+    async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle")) as s:
+        r1 = await s.send("My name is Bob.")
+        r2 = await s.send("What is my name?")   # auto-continues → "Bob"
+        print(s.session_id, r2.final_text)
+
+asyncio.run(chat())
+```
+
+On enter, the session allocates a private, persistent `XDG_DATA_HOME` tmpdir that
+every turn reuses, so opencode's SQLite session DB survives across turns. The
+first `send()` creates the session (its id is captured on `RunResult.session_id`);
+later turns continue it via `--session <id>`. Each session is an isolated island —
+no shared global DB, so no cross-session lock contention — and the tmpdir is
+removed when the `async with` block exits. `send()` accepts per-turn `run_cfg` and
+`timeout_s` overrides.
 
 ### Stream structured JSON events
 
@@ -176,6 +204,8 @@ The defaults already handle the common pitfalls when running many `async_run` ca
 - **Automatic retry** (`async_run(max_retries=2, retry_delay_s=1.0)`) — retries known SQLite-startup crashes with short backoff. Non-SQLite failures still fail fast.
 
 To opt out: pass `startup_delay_s=0` (and a large `startup_concurrency`) to drop the startup pacing, `isolate_db=False` to share session history across runs, and `max_retries=0` to disable retries.
+
+> For **multi-turn conversations** you don't need `isolate_db=False`. Use [`OpenCodeSession`](#multi-turn-conversation-opencodesession) instead — it keeps one session's DB alive across turns in a private dir, so context is preserved without sharing the global DB.
 
 ## Notes
 

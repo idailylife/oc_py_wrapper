@@ -70,6 +70,16 @@ def _text_from_event(ev: dict[str, Any]) -> str | None:
     return None
 
 
+def _session_id_from_event(ev: dict[str, Any]) -> str | None:
+    sid = ev.get("sessionID")
+    if isinstance(sid, str):
+        return sid
+    part = ev.get("part")
+    if isinstance(part, dict) and isinstance(part.get("sessionID"), str):
+        return part["sessionID"]
+    return None
+
+
 def run_result_fuzzy_text(result: "RunResult") -> str:
     """
     Best-effort extract human-visible model output across varying ``--format json`` shapes.
@@ -136,9 +146,12 @@ class RunResult:
     token_usage: TokenUsage = field(default_factory=TokenUsage)
     total_cost: float = 0.0
     turns: int = 0
+    session_id: str | None = None
 
     def append_event(self, ev: dict[str, Any]) -> None:
         self.events.append(ev)
+        if self.session_id is None:
+            self.session_id = _session_id_from_event(ev)
         chunk = _text_from_event(ev)
         if chunk:
             self.final_text += chunk

@@ -313,15 +313,23 @@ class AsyncOpenCodeClient:
         cwd: str,
         env: dict[str, str],
         run_cfg: RunConfig,
+        data_home: str | None = None,
     ) -> AsyncIterator[tuple[asyncio.subprocess.Process, list[str]]]:
         stderr_lines: list[str] = []
         cleanup_tmpdirs: list[str] = []
         # Give each process its own XDG_DATA_HOME so opencode.db is isolated.
         # Without this, all concurrent processes share ~/.local/share/opencode/opencode.db
         # and SQLite write locks during tool execution serialize the runs (37–46s delays).
-        if self._isolate_db:
-            xdg_tmpdir = tempfile.mkdtemp(prefix="oc_xdg_")
-            cleanup_tmpdirs.append(xdg_tmpdir)
+        # When *data_home* is provided the caller owns a persistent dir (e.g. an
+        # OpenCodeSession reusing one DB across turns), so it is NOT added to
+        # cleanup_tmpdirs — the caller deletes it when done.
+        managed = data_home is not None
+        if self._isolate_db or managed:
+            if managed:
+                xdg_tmpdir = data_home  # type: ignore[assignment]
+            else:
+                xdg_tmpdir = tempfile.mkdtemp(prefix="oc_xdg_")
+                cleanup_tmpdirs.append(xdg_tmpdir)
             # Symlink auth.json so provider API keys (stored by `opencode auth`)
             # are visible in the isolated data dir.  Without this, providers
             # that rely on auth.json (rather than env-var keys) fail with
@@ -331,7 +339,9 @@ class AsyncOpenCodeClient:
             if real_auth.is_file():
                 iso_oc_dir = Path(xdg_tmpdir) / "opencode"
                 iso_oc_dir.mkdir(parents=True, exist_ok=True)
-                (iso_oc_dir / "auth.json").symlink_to(real_auth)
+                link = iso_oc_dir / "auth.json"
+                if not link.exists():  # reused across turns — guard re-symlink
+                    link.symlink_to(real_auth)
             env = {**env, "XDG_DATA_HOME": xdg_tmpdir}
         # When the caller has not opted into host-config inheritance (the
         # default), redirect XDG_CONFIG_HOME / OPENCODE_TEST_HOME at a sanitized
@@ -425,6 +435,7 @@ class AsyncOpenCodeClient:
         log_file: str | Path | None = None,
         max_retries: int = 2,
         retry_delay_s: float = 1.0,
+        data_home: str | None = None,
     ) -> RunResult:
         """
         Run to completion and return a :class:`RunResult`.
@@ -457,7 +468,7 @@ class AsyncOpenCodeClient:
 
             log_fh = open(log_file, "w") if log_file is not None else None
             try:
-                async with self._managed_process(argv, cwd, env, run_cfg) as (proc, stderr_lines):
+                async with self._managed_process(argv, cwd, env, run_cfg, data_home=data_home) as (proc, stderr_lines):
                     async for line, ev in _stdout_line_event_iter(proc):
                         raw_acc.append(line)
                         events_acc.append(ev)

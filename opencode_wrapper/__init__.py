@@ -16,9 +16,11 @@ from opencode_wrapper.events import (
     parse_event_line,
     run_result_fuzzy_text,
 )
+from opencode_wrapper.session import OpenCodeSession
 
 __all__ = [
     "AsyncOpenCodeClient",
+    "OpenCodeSession",
     "RunConfig",
     "RunResult",
     "TokenUsage",
