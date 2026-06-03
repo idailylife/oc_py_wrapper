@@ -186,15 +186,32 @@ class RunConfig:
         return json.dumps(cfg, ensure_ascii=False)
 
 
-def validate_permission_actions(obj: Any, *, _path: str = "") -> None:
-    """Ensure string leaves are non-interactive OpenCode permission actions.
+def split_model(model: str) -> dict[str, str]:
+    """Split a ``"providerID/modelID"`` string into the server prompt-body shape.
 
-    ``"ask"`` is rejected because the subprocess has no terminal to prompt —
-    it would block forever.
+    opencode's server API wants ``{"providerID": ..., "modelID": ...}`` whereas
+    ``opencode run -m`` takes the ``provider/model`` string.  Only the first ``/``
+    separates provider from model (model ids may themselves contain ``/``).  A
+    string with no ``/`` is treated as a bare model id with an empty provider,
+    letting the server fall back to its default provider resolution.
     """
-    allowed = frozenset({"allow", "deny"})
+    provider, sep, rest = model.partition("/")
+    if not sep:
+        return {"providerID": "", "modelID": model}
+    return {"providerID": provider, "modelID": rest}
+
+
+def validate_permission_actions(obj: Any, *, _path: str = "", allow_ask: bool = False) -> None:
+    """Ensure string leaves are valid OpenCode permission actions.
+
+    ``"ask"`` is rejected by default because the run-mode subprocess has no
+    terminal to prompt — it would block forever.  The server/session path passes
+    ``allow_ask=True`` because there a ``permission.asked`` event is answerable via
+    the ``on_permission`` callback.
+    """
+    allowed = frozenset({"allow", "deny", "ask"} if allow_ask else {"allow", "deny"})
     if isinstance(obj, str):
-        if obj == "ask":
+        if obj == "ask" and not allow_ask:
             loc = f" at {_path!r}" if _path else ""
             raise ValueError(
                 f"Permission action 'ask' is not supported in non-interactive "
@@ -209,7 +226,7 @@ def validate_permission_actions(obj: Any, *, _path: str = "") -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
             child_path = f"{_path}.{k}" if _path else k
-            validate_permission_actions(v, _path=child_path)
+            validate_permission_actions(v, _path=child_path, allow_ask=allow_ask)
 
 
 def validate_config_for_run(cfg: RunConfig) -> None:

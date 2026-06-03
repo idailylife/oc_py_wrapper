@@ -203,3 +203,121 @@ def aggregate_run_result(
     for ev in events:
         r.append_event(ev)
     return r
+
+
+# ---------------------------------------------------------------------------
+# Server-mode (opencode serve / SSE) aggregation
+#
+# Server event shapes differ from `opencode run --format json`:
+#   {"type": "message.part.updated",
+#    "properties": {"sessionID": "...", "part": {"type": "text"|"tool"|"reasoning",
+#                                                 "text": "...", "id": "prt_...", ...}}}
+#   {"type": "message.updated", "properties": {"info": {"role": "assistant",
+#                                                       "tokens": {...}, "cost": ...}}}
+# Run-mode parsing above is intentionally left untouched.
+# ---------------------------------------------------------------------------
+
+
+def _server_assistant_text_from_messages(messages: list[dict[str, Any]]) -> str:
+    """Extract the last assistant message's concatenated text parts.
+
+    ``GET /session/{id}/message`` returns ``[{info:{role,...}, parts:[...]}, ...]``.
+    The authoritative final answer is the text parts of the final assistant turn.
+    """
+    last = ""
+    for m in messages:
+        info = m.get("info") if isinstance(m, dict) else None
+        if not isinstance(info, dict) or info.get("role") != "assistant":
+            continue
+        parts = m.get("parts")
+        if not isinstance(parts, list):
+            continue
+        texts = [
+            p["text"]
+            for p in parts
+            if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+        ]
+        joined = "".join(texts).strip()
+        if joined:
+            last = joined
+    return last
+
+
+def _accumulate_token_usage(usage: TokenUsage, tokens: Any, cost_acc: list[float], info: dict) -> None:
+    cost = info.get("cost")
+    if isinstance(cost, (int, float)):
+        cost_acc[0] += float(cost)
+    if isinstance(tokens, dict):
+        for attr, key in (("total", "total"), ("input", "input"), ("output", "output"), ("reasoning", "reasoning")):
+            val = tokens.get(key)
+            if isinstance(val, (int, float)):
+                setattr(usage, attr, getattr(usage, attr) + int(val))
+        cache = tokens.get("cache")
+        if isinstance(cache, dict):
+            for attr, key in (("cache_read", "read"), ("cache_write", "write")):
+                val = cache.get(key)
+                if isinstance(val, (int, float)):
+                    setattr(usage, attr, getattr(usage, attr) + int(val))
+
+
+def aggregate_server_result(
+    *,
+    events: list[dict[str, Any]],
+    session_id: str | None,
+    final_messages: list[dict[str, Any]] | None = None,
+    exit_code: int | None = 0,
+    stderr: str = "",
+) -> RunResult:
+    """Build a :class:`RunResult` from a server-mode turn's SSE events.
+
+    ``events`` are the raw SSE event dicts collected during the turn.  When
+    ``final_messages`` (the ``GET /session/{id}/message`` payload) is supplied it
+    is treated as the authoritative source for final text and token/cost totals;
+    otherwise those are reconstructed from the streamed events.
+    """
+    r = RunResult(events=list(events), exit_code=exit_code, stderr=stderr, session_id=session_id)
+
+    # tool_calls + streamed text snapshots keyed by part id (parts are replaced,
+    # not appended, as they stream — keep the latest snapshot per id).
+    text_by_part: dict[str, str] = {}
+    text_order: list[str] = []
+    cost_acc = [0.0]
+    seen_assistant_msgs: set[str] = set()
+
+    for ev in events:
+        etype = ev.get("type")
+        props = ev.get("properties", {}) if isinstance(ev.get("properties"), dict) else {}
+        if etype in ("message.part.updated", "message.part.delta"):
+            part = props.get("part")
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            pid = part.get("id") or ""
+            if ptype == "text" and isinstance(part.get("text"), str):
+                if pid not in text_by_part:
+                    text_order.append(pid)
+                text_by_part[pid] = part["text"]
+            elif ptype == "tool":
+                r.tool_calls.append({
+                    "type": "tool",
+                    "tool": part.get("tool"),
+                    "callID": part.get("callID"),
+                    "state": part.get("state"),
+                    "id": pid,
+                })
+        elif etype == "message.updated":
+            info = props.get("info")
+            if isinstance(info, dict) and info.get("role") == "assistant":
+                mid = info.get("id") or ""
+                if mid not in seen_assistant_msgs:
+                    seen_assistant_msgs.add(mid)
+                    r.turns += 1
+                _accumulate_token_usage(r.token_usage, info.get("tokens"), cost_acc, info)
+
+    r.total_cost = cost_acc[0]
+
+    if final_messages is not None:
+        r.final_text = _server_assistant_text_from_messages(final_messages)
+    if not r.final_text:
+        r.final_text = "".join(text_by_part[pid] for pid in text_order).strip()
+    return r

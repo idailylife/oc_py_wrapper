@@ -1,60 +1,111 @@
-"""Unit tests for OpenCodeSession multi-turn behaviour (mocked subprocess)."""
+"""Unit tests for OpenCodeSession multi-turn behaviour (mocked server transport).
+
+OpenCodeSession now drives an ``opencode serve`` process via :class:`_OpenCodeServer`.
+These tests replace that class with a scriptable in-memory fake that feeds canned
+SSE events onto the per-session queue and records HTTP posts, so the session's
+event-loop contract can be exercised without spawning a real server.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import os
-from pathlib import Path
-from unittest.mock import patch
+from typing import Any
 
 import pytest
 
 from opencode_wrapper import AsyncOpenCodeClient, OpenCodeSession, RunConfig
 from opencode_wrapper.events import aggregate_run_result
 
-
-class _FakeStdout:
-    def __init__(self, lines: list[bytes]) -> None:
-        self._q = list(lines)
-
-    async def readuntil(self, sep: bytes = b"\n") -> bytes:
-        await asyncio.sleep(0)
-        if not self._q:
-            return b""
-        return self._q.pop(0)
-
-    async def readexactly(self, n: int) -> bytes:
-        raise AssertionError("readexactly should not be called for small test lines")
+SID = "ses_test"
 
 
-class _FakeStderr:
-    async def readuntil(self, sep: bytes = b"\n") -> bytes:
-        await asyncio.sleep(0)
-        return b""
-
-    async def readexactly(self, n: int) -> bytes:
-        raise AssertionError("readexactly should not be called for small test lines")
-
-
-class _FakeProc:
-    def __init__(self, stdout_lines: list[bytes]) -> None:
-        self.stdout = _FakeStdout(stdout_lines)
-        self.stderr = _FakeStderr()
-        self.returncode: int | None = 0
-
-    async def wait(self) -> int:
-        if self.returncode is None:
-            self.returncode = 0
-        return self.returncode
-
-    def kill(self) -> None:
-        self.returncode = 137
+def _text_turn(text: str, sid: str = SID) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "message.part.updated",
+            "properties": {"sessionID": sid, "part": {"type": "text", "id": "prt_1", "text": text}},
+        },
+        {"type": "session.idle", "properties": {"sessionID": sid}},
+    ]
 
 
-def _line(sid: str) -> bytes:
-    return (
-        '{"type":"text","sessionID":"%s","part":{"type":"text","text":"ok"}}\n' % sid
-    ).encode()
+def _final_messages(text: str) -> list[dict[str, Any]]:
+    return [{"info": {"role": "assistant", "id": "msg_1"}, "parts": [{"type": "text", "text": text}]}]
+
+
+class _FakeServer:
+    """Drop-in for ``_OpenCodeServer`` that scripts events per prompt turn."""
+
+    def __init__(self, binary: str, run_cfg: RunConfig, workspace: str) -> None:
+        self.binary = binary
+        self.run_cfg = run_cfg
+        self.workspace = workspace
+        self.queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        self.posts: list[tuple[str, Any]] = []
+        self.permission_answers: list[str] = []
+        self.turn_events: list[list[dict[str, Any]]] = []
+        self.final_messages_by_turn: list[list[dict[str, Any]]] = []
+        self._turn_idx = 0
+        self.closed = False
+        self.deleted: list[str] = []
+
+    @property
+    def stderr_tail(self) -> str:
+        return ""
+
+    async def start(self) -> None:
+        pass
+
+    def subscribe(self, session_id: str) -> "asyncio.Queue[dict[str, Any]]":
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.queues[session_id] = q
+        return q
+
+    def unsubscribe(self, session_id: str) -> None:
+        self.queues.pop(session_id, None)
+
+    async def post(self, path: str, body: Any = None) -> Any:
+        self.posts.append((path, body))
+        if path.startswith("/session?directory="):
+            return {"id": SID}
+        if "/prompt_async" in path:
+            sid = path.split("/session/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+            evs = self.turn_events[self._turn_idx] if self._turn_idx < len(self.turn_events) else []
+            self._turn_idx += 1
+            q = self.queues[sid]
+            for ev in evs:
+                q.put_nowait(ev)
+            return None
+        if "/permissions/" in path:
+            self.permission_answers.append(body.get("response"))
+            return None
+        return None
+
+    async def get(self, path: str) -> Any:
+        idx = self._turn_idx - 1
+        if 0 <= idx < len(self.final_messages_by_turn):
+            return self.final_messages_by_turn[idx]
+        return []
+
+    async def delete(self, path: str) -> Any:
+        self.deleted.append(path)
+        return None
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _install_fake(monkeypatch) -> dict[str, _FakeServer]:
+    """Patch session._OpenCodeServer with the fake; capture the instance created."""
+    holder: dict[str, _FakeServer] = {}
+
+    def factory(binary: str, run_cfg: RunConfig, workspace: str) -> _FakeServer:
+        srv = _FakeServer(binary, run_cfg, workspace)
+        holder["server"] = srv
+        return srv
+
+    monkeypatch.setattr("opencode_wrapper.session._OpenCodeServer", factory)
+    return holder
 
 
 def test_run_result_extracts_session_id() -> None:
@@ -67,37 +118,103 @@ def test_run_result_extracts_session_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_injects_session_id_across_turns(monkeypatch, tmp_path) -> None:
-    procs = [_FakeProc([_line("ses_x")]), _FakeProc([_line("ses_x")])]
-    captured_argv: list[list[str]] = []
-    captured_data_home: list[str | None] = []
-
-    async def fake_exec(*args, **kwargs):
-        captured_argv.append(list(args))
-        captured_data_home.append(kwargs.get("env", {}).get("XDG_DATA_HOME"))
-        return procs.pop(0)
-
+async def test_session_multi_turn_continuity(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
     client = AsyncOpenCodeClient(binary="opencode")
     monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
 
-    with patch("asyncio.create_subprocess_exec", new=fake_exec):
-        async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig()) as s:
-            data_home = s._data_home
-            assert data_home is not None and Path(data_home).is_dir()
-            r1 = await s.send("turn 1")
-            assert s.session_id == "ses_x"
-            r2 = await s.send("turn 2")
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig()) as s:
+        srv = holder["server"]
+        srv.turn_events = [_text_turn("hi Bob"), _text_turn("Bob")]
+        srv.final_messages_by_turn = [_final_messages("hi Bob"), _final_messages("Bob")]
 
-    assert r1.session_id == "ses_x"
-    assert r2.session_id == "ses_x"
-    # Turn 1: no --session; turn 2: continues ses_x.
-    assert "--session" not in captured_argv[0]
-    assert "--session" in captured_argv[1]
-    assert "ses_x" in captured_argv[1]
-    # Same private data dir reused across turns; removed after context exit.
-    assert captured_data_home[0] == data_home
-    assert captured_data_home[1] == data_home
-    assert not Path(data_home).exists()
+        assert s.session_id == SID
+        r1 = await s.send("My name is Bob.")
+        r2 = await s.send("What is my name?")
+
+    assert r1.session_id == SID and r2.session_id == SID
+    assert r1.final_text == "hi Bob"
+    assert r2.final_text == "Bob"
+    # One server, one session, re-prompted: exactly one session create.
+    creates = [p for p, _ in srv.posts if p.startswith("/session?directory=")]
+    prompts = [p for p, _ in srv.posts if "/prompt_async" in p]
+    assert len(creates) == 1
+    assert len(prompts) == 2
+    # Server and session torn down on exit.
+    assert srv.closed is True
+    assert any(f"/session/{SID}" == d for d in srv.deleted)
+
+
+@pytest.mark.asyncio
+async def test_per_turn_model_override_in_prompt_body(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig(model="opencode/big-pickle")) as s:
+        srv = holder["server"]
+        srv.turn_events = [_text_turn("x"), _text_turn("y")]
+        await s.send("turn 1")
+        await s.send("turn 2", run_cfg=RunConfig(model="anthropic/claude"))
+
+    prompt_bodies = [b for p, b in srv.posts if "/prompt_async" in p]
+    assert prompt_bodies[0]["model"] == {"providerID": "opencode", "modelID": "big-pickle"}
+    assert prompt_bodies[1]["model"] == {"providerID": "anthropic", "modelID": "claude"}
+
+
+@pytest.mark.asyncio
+async def test_permission_callback_invoked(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    seen: list[dict[str, Any]] = []
+
+    async def approve(props: dict[str, Any]) -> str:
+        seen.append(props)
+        return "once"
+
+    async with OpenCodeSession(
+        client, tmp_path, run_cfg=RunConfig(), on_permission=approve
+    ) as s:
+        srv = holder["server"]
+        srv.turn_events = [
+            [
+                {
+                    "type": "permission.asked",
+                    "properties": {"sessionID": SID, "id": "per_1", "permission": "bash"},
+                },
+                *_text_turn("done"),
+            ]
+        ]
+        srv.final_messages_by_turn = [_final_messages("done")]
+        r = await s.send("run echo")
+
+    assert r.final_text == "done"
+    assert len(seen) == 1 and seen[0]["id"] == "per_1"
+    assert srv.permission_answers == ["once"]
+
+
+@pytest.mark.asyncio
+async def test_permission_default_reject(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig()) as s:
+        srv = holder["server"]
+        srv.turn_events = [
+            [
+                {
+                    "type": "permission.asked",
+                    "properties": {"sessionID": SID, "id": "per_9", "permission": "bash"},
+                },
+                *_text_turn("ok"),
+            ]
+        ]
+        await s.send("run echo")
+
+    assert srv.permission_answers == ["reject"]
 
 
 @pytest.mark.asyncio

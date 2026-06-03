@@ -68,26 +68,33 @@ Publishing the release fires `.github/workflows/release.yml`, which rebuilds the
 
 ## Architecture
 
-The wrapper lives in `opencode_wrapper/` with four modules:
+The wrapper lives in `opencode_wrapper/` with six modules:
 
 - **`client.py`** — `AsyncOpenCodeClient` spawns `opencode run --format json` as a subprocess. Two main methods: `async_run()` (returns aggregated `RunResult`) and `async_stream()` (yields parsed event dicts). Helper functions `build_argv()` and `build_env()` construct the CLI invocation.
-- **`config.py`** — `RunConfig` dataclass maps to CLI flags and `OPENCODE_CONFIG_CONTENT` env var (JSON). Config is injected per-call via deep-merge of `permission`, `mcp`, `tools`, and `config_overrides` fields.
-- **`events.py`** — `parse_event_line()` handles JSON stdout lines; non-JSON lines become `diagnostic` events so the stream never breaks. `RunResult` aggregates events, extracted text, tool call summaries, and the opencode `session_id`. `run_result_fuzzy_text()` does best-effort text extraction across varying event shapes.
-- **`session.py`** — `OpenCodeSession`, a stateful multi-turn conversation. See "Multi-turn sessions" below.
+- **`config.py`** — `RunConfig` dataclass maps to CLI flags and `OPENCODE_CONFIG_CONTENT` env var (JSON). Config is injected per-call via deep-merge of `permission`, `mcp`, `tools`, and `config_overrides` fields. `split_model()` converts a `"provider/model"` string to the server's `{providerID, modelID}` body shape.
+- **`events.py`** — `parse_event_line()` handles JSON stdout lines; non-JSON lines become `diagnostic` events so the stream never breaks. `RunResult` aggregates events, extracted text, tool call summaries, and the opencode `session_id`. `aggregate_run_result()` builds it from run-mode stdout; `aggregate_server_result()` builds it from server-mode SSE events + the `GET /session/{id}/message` payload.
+- **`server.py`** — `_OpenCodeServer`, a stdlib-only (`urllib` + `asyncio` + `threading`) HTTP/SSE client that owns one `opencode serve` subprocess. Reuses `client.build_env` / `client._isolate_user_config` for identical hermetic isolation; consumes the `/event` SSE bus in a daemon thread and fans events out to per-session `asyncio.Queue`s. Backs `OpenCodeSession`.
+- **`session.py`** — `OpenCodeSession`, a stateful multi-turn conversation over `opencode serve`. See "Multi-turn sessions" below.
 - **`errors.py`** — Exception hierarchy rooted at `OpenCodeError`. `OpenCodeProcessError` captures exit code, stderr, events, and raw stdout for debugging.
 
 ### Multi-turn sessions
 
-`OpenCodeSession(client, workspace, run_cfg=...)` is an async context manager for multi-turn chat over one opencode session:
+`OpenCodeSession(client, workspace, *, run_cfg=..., on_permission=...)` is an async context manager for multi-turn chat. Unlike run mode (one-shot `opencode run` per call), a session owns a headless `opencode serve` process for the lifetime of the `async with` block and re-prompts one server-side session, so the model retains context **natively** across turns:
 
 ```python
-async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle")) as s:
+async def approve(props):  # optional human-in-the-loop permission callback
+    return "once"          # "once" | "always" | "reject"
+
+async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle"),
+                           on_permission=approve) as s:
     r1 = await s.send("My name is Bob.")
-    r2 = await s.send("What is my name?")   # auto-continues → "Bob"
+    r2 = await s.send("What is my name?")   # continues natively → "Bob"
     print(s.session_id)
 ```
 
-On enter it allocates a private, persistent `XDG_DATA_HOME` tmpdir (`oc_session_*`) passed to every turn via the `async_run(..., data_home=...)` param. The first `send()` creates the opencode session (id captured from `RunResult.session_id`); later turns inject `--session <id>`. This keeps the SQLite session DB alive across turns *without* sharing the global DB — each session is an island, so there is no cross-session lock contention. The tmpdir is removed on context exit. Works regardless of the client's `isolate_db` setting (`data_home` takes over the data-dir branch in `_managed_process`).
+On enter: spawn `_OpenCodeServer` (hermetic env from `run_cfg` + workspace, same isolation as run mode) then `POST /session?directory=<ws>`. Each `send()` subscribes to the session's SSE queue, `POST`s `prompt_async`, and loops over events until `session.idle` / `session.status idle`, answering any `permission.asked` via `on_permission` (default `None` → auto-`"reject"` so a turn never blocks). On exit: best-effort `DELETE /session/{id}` then tear the server down.
+
+Key behavioural nuance: per-`send` `run_cfg` overrides apply only to **prompt-body knobs** (`model` / `agent` / `tools`); `permission` / `mcp` / `instructions` are server-global, fixed at `__aenter__`. `permission` accepts `"ask"` here (answerable via the callback) — unlike run mode, which rejects it. `RunConfig.files` is not yet supported in server-mode sessions (`send` raises `NotImplementedError`).
 
 
 ## Key Design Decisions

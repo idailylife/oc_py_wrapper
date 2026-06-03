@@ -70,9 +70,11 @@ reasoning effort.
 
 ### Multi-turn conversation (`OpenCodeSession`)
 
-For a stateful, multi-turn chat over a single opencode session, use
-`OpenCodeSession` as an async context manager. Each `send()` continues the same
-session, so the model retains context across turns:
+For a stateful, multi-turn chat, use `OpenCodeSession` as an async context
+manager. Unlike the one-shot `async_run`/`async_stream` (which spawn
+`opencode run` per call), a session owns a headless `opencode serve` process for
+the duration of the `async with` block and re-prompts one server-side session, so
+the model retains context **natively** across turns:
 
 ```python
 import asyncio
@@ -82,19 +84,38 @@ async def chat():
     client = AsyncOpenCodeClient()
     async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle")) as s:
         r1 = await s.send("My name is Bob.")
-        r2 = await s.send("What is my name?")   # auto-continues → "Bob"
+        r2 = await s.send("What is my name?")   # continues natively → "Bob"
         print(s.session_id, r2.final_text)
 
 asyncio.run(chat())
 ```
 
-On enter, the session allocates a private, persistent `XDG_DATA_HOME` tmpdir that
-every turn reuses, so opencode's SQLite session DB survives across turns. The
-first `send()` creates the session (its id is captured on `RunResult.session_id`);
-later turns continue it via `--session <id>`. Each session is an isolated island —
-no shared global DB, so no cross-session lock contention — and the tmpdir is
-removed when the `async with` block exits. `send()` accepts per-turn `run_cfg` and
-`timeout_s` overrides.
+On enter, the session spawns `opencode serve` (with the same hermetic isolation
+run mode uses) and creates one session pinned to the workspace; on exit the
+session is deleted and the server torn down. `send()` accepts per-turn `run_cfg`
+and `timeout_s` overrides, but only **prompt-body knobs** (`model` / `agent` /
+`tools`) vary per turn — `permission` / `mcp` / `instructions` are fixed at enter
+(they are server-global).
+
+#### Human-in-the-loop permissions
+
+Because the server can pause on a permission request, sessions support an
+`on_permission` async callback that run mode cannot. Set `permission={"bash":
+"ask"}` and answer each prompt with `"once"` / `"always"` / `"reject"`:
+
+```python
+async def approve(props):    # props: {"id", "sessionID", "permission", ...}
+    return "once"
+
+async with OpenCodeSession(client, ".", run_cfg=RunConfig(permission={"bash": "ask"}),
+                           on_permission=approve) as s:
+    r = await s.send("Run `echo hi` and tell me the output.")
+```
+
+When `on_permission` is `None` (the default), any `permission.asked` is
+auto-rejected so a turn never blocks. File attachments (`RunConfig.files`) are not
+yet supported in server-mode sessions — embed file content in the prompt or use
+`async_run` for file-based runs.
 
 ### Stream structured JSON events
 
@@ -205,7 +226,7 @@ The defaults already handle the common pitfalls when running many `async_run` ca
 
 To opt out: pass `startup_delay_s=0` (and a large `startup_concurrency`) to drop the startup pacing, `isolate_db=False` to share session history across runs, and `max_retries=0` to disable retries.
 
-> For **multi-turn conversations** you don't need `isolate_db=False`. Use [`OpenCodeSession`](#multi-turn-conversation-opencodesession) instead — it keeps one session's DB alive across turns in a private dir, so context is preserved without sharing the global DB.
+> These notes apply to `async_run` / `async_stream` (run mode). For **multi-turn conversations** use [`OpenCodeSession`](#multi-turn-conversation-opencodesession) instead — it runs `opencode serve` and re-prompts one server-side session, so context is preserved natively with no shared-DB contention.
 
 ## Notes
 
