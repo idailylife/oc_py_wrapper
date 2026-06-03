@@ -92,7 +92,9 @@ async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pi
     print(s.session_id)
 ```
 
-On enter: spawn `_OpenCodeServer` (hermetic env from `run_cfg` + workspace, same isolation as run mode) then `POST /session?directory=<ws>`. Each `send()` subscribes to the session's SSE queue, `POST`s `prompt_async`, and loops over events until `session.idle` / `session.status idle`, answering any `permission.asked` via `on_permission` (default `None` → auto-`"reject"` so a turn never blocks). On exit: best-effort `DELETE /session/{id}` then tear the server down.
+On enter: spawn `_OpenCodeServer` (hermetic env from `run_cfg` + workspace, same isolation as run mode) then `POST /session?directory=<ws>`. Each `send()` subscribes to the session's SSE queue, `POST`s `prompt_async`, and loops over events until `session.idle` / `session.status idle`, answering any `permission.asked` via `on_permission` (default `None` → auto-`"reject"`) and any `question.asked` (opencode's `question` tool) via `on_question` (default `None` → auto-reject); both default to non-blocking so a turn never hangs. On exit: best-effort `DELETE /session/{id}` then tear the server down.
+
+`on_question(props) -> answers | None` answers the `question` tool: `answers` is a list with one entry per question, each a list of selected option labels; `None` rejects. Replies go to `POST /question/{id}/reply?directory=<ws>` body `{"answers": [...]}` (reject → `POST /question/{id}/reject`). The `question` tool is enabled by default under `opencode serve` (gated on `OPENCODE_CLIENT`, default `"cli"`); `RunConfig(extra_env={"OPENCODE_ENABLE_QUESTION_TOOL": "1"})` force-enables it.
 
 Key behavioural nuance: per-`send` `run_cfg` overrides apply only to **prompt-body knobs** (`model` / `agent` / `tools`); `permission` / `mcp` / `instructions` are server-global, fixed at `__aenter__`. `permission` accepts `"ask"` here (answerable via the callback) — unlike run mode, which rejects it. `RunConfig.files` is not yet supported in server-mode sessions (`send` raises `NotImplementedError`).
 

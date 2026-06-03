@@ -43,6 +43,8 @@ class _FakeServer:
         self.queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self.posts: list[tuple[str, Any]] = []
         self.permission_answers: list[str] = []
+        self.question_replies: list[Any] = []
+        self.question_rejects: list[str] = []
         self.turn_events: list[list[dict[str, Any]]] = []
         self.final_messages_by_turn: list[list[dict[str, Any]]] = []
         self._turn_idx = 0
@@ -79,6 +81,14 @@ class _FakeServer:
         if "/permissions/" in path:
             self.permission_answers.append(body.get("response"))
             return None
+        if path.startswith("/question/") and "/reply" in path:
+            qid = path.split("/question/", 1)[1].split("/", 1)[0]
+            self.question_replies.append((qid, body.get("answers")))
+            return True
+        if path.startswith("/question/") and "/reject" in path:
+            qid = path.split("/question/", 1)[1].split("/", 1)[0]
+            self.question_rejects.append(qid)
+            return True
         return None
 
     async def get(self, path: str) -> Any:
@@ -215,6 +225,97 @@ async def test_permission_default_reject(monkeypatch, tmp_path) -> None:
         await s.send("run echo")
 
     assert srv.permission_answers == ["reject"]
+
+
+@pytest.mark.asyncio
+async def test_question_callback_replies(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    seen: list[dict[str, Any]] = []
+
+    async def answer(props: dict[str, Any]) -> list[list[str]]:
+        seen.append(props)
+        return [["Postgres"]]
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig(), on_question=answer) as s:
+        srv = holder["server"]
+        srv.turn_events = [
+            [
+                {
+                    "type": "question.asked",
+                    "properties": {
+                        "sessionID": SID,
+                        "id": "que_1",
+                        "questions": [
+                            {
+                                "question": "Which DB?",
+                                "header": "DB",
+                                "options": [{"label": "Postgres", "description": "pg"}],
+                            }
+                        ],
+                    },
+                },
+                *_text_turn("done"),
+            ]
+        ]
+        srv.final_messages_by_turn = [_final_messages("done")]
+        r = await s.send("pick a db")
+
+    assert r.final_text == "done"
+    assert len(seen) == 1 and seen[0]["id"] == "que_1"
+    assert srv.question_replies == [("que_1", [["Postgres"]])]
+    assert srv.question_rejects == []
+
+
+@pytest.mark.asyncio
+async def test_question_default_rejects(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig()) as s:
+        srv = holder["server"]
+        srv.turn_events = [
+            [
+                {
+                    "type": "question.asked",
+                    "properties": {"sessionID": SID, "id": "que_9", "questions": []},
+                },
+                *_text_turn("ok"),
+            ]
+        ]
+        await s.send("ask me")
+
+    assert srv.question_rejects == ["que_9"]
+    assert srv.question_replies == []
+
+
+@pytest.mark.asyncio
+async def test_question_callback_returning_none_rejects(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    async def dismiss(props: dict[str, Any]) -> None:
+        return None
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig(), on_question=dismiss) as s:
+        srv = holder["server"]
+        srv.turn_events = [
+            [
+                {
+                    "type": "question.asked",
+                    "properties": {"sessionID": SID, "id": "que_2", "questions": []},
+                },
+                *_text_turn("ok"),
+            ]
+        ]
+        await s.send("ask me")
+
+    assert srv.question_rejects == ["que_2"]
+    assert srv.question_replies == []
 
 
 @pytest.mark.asyncio

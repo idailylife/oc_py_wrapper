@@ -117,6 +117,33 @@ auto-rejected so a turn never blocks. File attachments (`RunConfig.files`) are n
 yet supported in server-mode sessions — embed file content in the prompt or use
 `async_run` for file-based runs.
 
+#### Answering the model's questions
+
+opencode's built-in `question` tool lets the model ask the user multiple-choice
+questions mid-run (gather preferences, clarify, offer choices). Pass an
+`on_question` async callback to answer it. The callback receives the question
+props (`{"id", "sessionID", "questions": [{"question", "header", "options":
+[{"label", "description"}], "multiple"?, "custom"?}], ...}`) and returns a list
+with one entry per question — each a list of selected option labels. Returning
+`None` rejects (dismisses) the question.
+
+```python
+async def answer(props):
+    out = []
+    for q in props["questions"]:
+        out.append([q["options"][0]["label"]])   # pick the first option
+    return out
+
+async with OpenCodeSession(client, ".", run_cfg=RunConfig(model="opencode/big-pickle"),
+                           on_question=answer) as s:
+    r = await s.send("Ask me which database to use, then scaffold it.")
+```
+
+When `on_question` is `None` (the default), any `question.asked` is auto-rejected
+so a turn never blocks. The `question` tool is enabled by default under
+`opencode serve`; set `RunConfig(extra_env={"OPENCODE_ENABLE_QUESTION_TOOL": "1"})`
+to force-enable it regardless of the server's client identity.
+
 ### Stream structured JSON events
 
 ```python

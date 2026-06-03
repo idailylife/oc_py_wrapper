@@ -26,6 +26,11 @@ from opencode_wrapper import AsyncOpenCodeClient, OpenCodeSession, RunConfig
 # Optional model pin; falls back to the provider default when unset.
 _MODEL = os.environ.get("OPENCODE_INTEGRATION_MODEL", "").strip() or None
 
+# The `question` tool is gated on OPENCODE_CLIENT (default "cli" enables it);
+# set this flag too so the tool is available regardless of how the server reads
+# the client identity.
+_QUESTION_ENV = {"OPENCODE_ENABLE_QUESTION_TOOL": "1"}
+
 
 def _timeout() -> float:
     return float(os.environ.get("OPENCODE_INTEGRATION_TIMEOUT_S", "300"))
@@ -79,16 +84,63 @@ async def test_session_permission_callback_runs_bash(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_session_question_callback_answers(
+    opencode_path: str,
+    integration_workspace: Path,
+) -> None:
+    """The model's ``question`` tool pauses; ``on_question`` answers; the run continues."""
+    client = AsyncOpenCodeClient(binary=opencode_path)
+    asked: list[dict[str, Any]] = []
+
+    async def answer(props: dict[str, Any]) -> list[list[str]]:
+        asked.append(props)
+        # Answer each asked question by picking its first option's label.
+        out: list[list[str]] = []
+        for q in props.get("questions", []):
+            opts = q.get("options") or []
+            out.append([opts[0]["label"]] if opts else ["yes"])
+        return out
+
+    cfg = RunConfig(model=_MODEL, extra_env=_QUESTION_ENV)
+    async with OpenCodeSession(
+        client, integration_workspace, run_cfg=cfg, on_question=answer, timeout_s=_timeout()
+    ) as s:
+        await s.send(
+            "Use the `question` tool to ask me whether you should proceed, with options "
+            "'Yes' and 'No'. Do not do anything else until I answer."
+        )
+
+    assert asked, "expected at least one question.asked event"
+    assert asked[0].get("questions"), "question.asked should carry the questions payload"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_session_default_rejects_permission(
     opencode_path: str,
     integration_workspace: Path,
 ) -> None:
-    """With no callback, a ``permission.asked`` is auto-rejected — the turn still completes."""
+    """With no callback, a ``permission.asked`` is auto-rejected — the turn still completes.
+
+    The contract under test is "no hang": a bash-gated prompt with no
+    ``on_permission`` must return (the default reject unblocks the turn) rather
+    than block until timeout. ``send`` wraps the turn in ``asyncio.wait_for``, so
+    returning at all proves the turn was not stuck waiting on the prompt. We do
+    NOT string-match the command output here — the model tends to echo the
+    prompt's literal command text back, which would false-positive.
+    """
     client = AsyncOpenCodeClient(binary=opencode_path)
     cfg = RunConfig(model=_MODEL, permission={"bash": "ask"})
     async with OpenCodeSession(
         client, integration_workspace, run_cfg=cfg, timeout_s=_timeout()
     ) as s:
-        # Should not hang: default callback rejects, the turn returns.
-        r = await s.send("Run `echo SHOULD_NOT_RUN` if you are allowed to.")
-    assert "SHOULD_NOT_RUN" not in (r.final_text or "")
+        r = await s.send("Run the shell command `echo CANARY_OUTPUT` and report its output.")
+    # No bash tool call reached a completed state with real output (it was rejected).
+    completed_bash = [
+        t
+        for t in r.tool_calls
+        if t.get("tool") == "bash"
+        and isinstance(t.get("state"), dict)
+        and t["state"].get("status") == "completed"
+    ]
+    assert not completed_bash, f"bash should have been rejected, not completed: {completed_bash}"

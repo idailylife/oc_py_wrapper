@@ -22,12 +22,13 @@ from opencode_wrapper.events import (
     parse_event_line,
     run_result_fuzzy_text,
 )
-from opencode_wrapper.session import OpenCodeSession, PermissionCallback
+from opencode_wrapper.session import OpenCodeSession, PermissionCallback, QuestionCallback
 
 __all__ = [
     "AsyncOpenCodeClient",
     "OpenCodeSession",
     "PermissionCallback",
+    "QuestionCallback",
     "RunConfig",
     "RunResult",
     "TokenUsage",

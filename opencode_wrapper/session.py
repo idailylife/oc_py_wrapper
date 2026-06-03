@@ -7,10 +7,11 @@ creates one opencode session pinned to the workspace directory; every
 :meth:`send` re-prompts that same session, so the model retains context natively
 across turns.  On exit the session is deleted and the server torn down.
 
-Unlike run mode, server mode can answer permission prompts: pass an
+Unlike run mode, server mode can answer interactive prompts: pass an
 ``on_permission`` async callback to pause on a ``permission.asked`` event and
-resume with ``"once"`` / ``"always"`` / ``"reject"`` — the human-in-the-loop
-hook run mode cannot provide.
+resume with ``"once"`` / ``"always"`` / ``"reject"``, and/or an ``on_question``
+callback to answer the ``question`` tool's ``question.asked`` event — neither is
+possible with the one-shot run-mode subprocess.
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ _UNSET: Any = object()
 
 # An async callback invoked on each permission request; returns the decision.
 PermissionCallback = Callable[[dict[str, Any]], Awaitable[str]]
+
+# An async callback invoked on each ``question.asked`` request. Returns the
+# answers: a list with one entry per question, each entry a list of selected
+# option labels (multiple labels only when the question allows ``multiple``).
+# Returning ``None`` rejects the question (the model is told it was dismissed).
+QuestionCallback = Callable[[dict[str, Any]], Awaitable[Optional[list[list[str]]]]]
 
 
 class OpenCodeSession:
@@ -56,6 +63,14 @@ class OpenCodeSession:
         Async callback ``(permission_props) -> "once" | "always" | "reject"``.
         When ``None`` (the default), any ``permission.asked`` is auto-rejected so
         a turn never blocks waiting for input.
+    on_question:
+        Async callback ``(question_props) -> answers | None`` for the ``question``
+        tool's ``question.asked`` event. ``answers`` is a list with one entry per
+        question, each a list of selected option labels; ``None`` rejects the
+        question. When ``None`` (the default), any ``question.asked`` is
+        auto-rejected so a turn never blocks. The ``question`` tool is enabled by
+        default in ``opencode serve`` (it is gated on ``OPENCODE_CLIENT``, whose
+        default ``"cli"`` enables it).
     """
 
     def __init__(
@@ -66,12 +81,14 @@ class OpenCodeSession:
         run_cfg: RunConfig | None = None,
         timeout_s: float | None = None,
         on_permission: Optional[PermissionCallback] = None,
+        on_question: Optional[QuestionCallback] = None,
     ) -> None:
         self._client = client
         self._workspace = str(Path(workspace).expanduser().resolve())
         self._base_cfg = run_cfg or RunConfig()
         self._timeout_s = timeout_s
         self._on_permission = on_permission
+        self._on_question = on_question
         self._server: _OpenCodeServer | None = None
         self.session_id: str | None = None
 
@@ -123,20 +140,23 @@ class OpenCodeSession:
         run_cfg: RunConfig | None = None,
         timeout_s: float | object = _UNSET,
         on_permission: Optional[PermissionCallback] | object = _UNSET,
+        on_question: Optional[QuestionCallback] | object = _UNSET,
     ) -> RunResult:
         """Run one turn on the persistent session and return its :class:`RunResult`.
 
         Per-call ``run_cfg`` only affects prompt-body knobs (``model`` / ``agent``
         / ``tools``); ``permission`` / ``mcp`` / ``instructions`` are fixed at
-        ``__aenter__``.  ``on_permission`` may be overridden per call.
+        ``__aenter__``.  ``on_permission`` and ``on_question`` may be overridden
+        per call.
         """
         if self._server is None or self.session_id is None:
             raise RuntimeError("OpenCodeSession.send() must be called inside 'async with'")
         cfg = run_cfg or self._base_cfg
         on_perm = self._on_permission if on_permission is _UNSET else on_permission  # type: ignore[assignment]
+        on_q = self._on_question if on_question is _UNSET else on_question  # type: ignore[assignment]
         eff_timeout = self._timeout_s if timeout_s is _UNSET else timeout_s  # type: ignore[assignment]
 
-        coro = self._run_turn(prompt, cfg, on_perm)  # type: ignore[arg-type]
+        coro = self._run_turn(prompt, cfg, on_perm, on_q)  # type: ignore[arg-type]
         if eff_timeout is not None:
             try:
                 return await asyncio.wait_for(coro, timeout=eff_timeout)  # type: ignore[arg-type]
@@ -151,6 +171,7 @@ class OpenCodeSession:
         prompt: str,
         cfg: RunConfig,
         on_perm: Optional[PermissionCallback],
+        on_question: Optional[QuestionCallback] = None,
     ) -> RunResult:
         assert self._server is not None and self.session_id is not None
         sid = self.session_id
@@ -181,6 +202,18 @@ class OpenCodeSession:
                         await server.post(
                             f"/session/{sid}/permissions/{pid}", {"response": decision}
                         )
+                    continue
+                if etype == "question.asked":
+                    qid = props.get("id")
+                    answers = await on_question(props) if on_question is not None else None
+                    if qid:
+                        if answers is None:
+                            await server.post(f"/question/{qid}/reject?directory={self._dir_q()}")
+                        else:
+                            await server.post(
+                                f"/question/{qid}/reply?directory={self._dir_q()}",
+                                {"answers": answers},
+                            )
                     continue
                 if etype == "session.error":
                     raise OpenCodeProcessError(
