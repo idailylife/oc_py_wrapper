@@ -38,43 +38,34 @@ def build_argv(
     prompt: str,
     run_cfg: RunConfig,
 ) -> list[str]:
-    """Build ``opencode run`` argument list."""
-    cmd: list[str] = [binary_resolved, "run", "--format", "json"]
+    """Build ``opencode run`` argument list.
 
-    if run_cfg.print_logs:
-        cmd.append("--print-logs")
-    if run_cfg.log_level:
-        cmd.extend(["--log-level", run_cfg.log_level])
-    if run_cfg.command:
-        cmd.extend(["--command", run_cfg.command])
-    if run_cfg.continue_session:
-        cmd.append("--continue")
-    if run_cfg.session_id:
-        cmd.extend(["--session", run_cfg.session_id])
-    if run_cfg.fork:
-        cmd.append("--fork")
-    if run_cfg.share is True:
-        cmd.append("--share")
+    ``model`` / ``agent`` are structured fields shared with server mode and map
+    to ``-m`` / ``--agent``.  Every other ``opencode run`` flag is passed through
+    ``run_cfg.cli_kwargs``: each entry expands to ``--flag`` (bool ``True``),
+    ``--flag=value`` (multi-char key) / ``-f value`` (single-char key), or a
+    repetition per element (list/tuple value).  ``False`` / ``None`` are skipped.
+    The argv list is handed to ``create_subprocess_exec`` (no shell), so values
+    are not subject to shell injection.
+    """
+    cmd: list[str] = [binary_resolved, "run", "--format", "json"]
     if run_cfg.model:
         cmd.extend(["-m", run_cfg.model])
     if run_cfg.agent:
         cmd.extend(["--agent", run_cfg.agent])
-    for f in run_cfg.files:
-        cmd.extend(["-f", str(f)])
-    if run_cfg.title:
-        cmd.extend(["--title", run_cfg.title])
-    if run_cfg.attach:
-        cmd.extend(["--attach", run_cfg.attach])
-    if run_cfg.password:
-        cmd.extend(["-p", run_cfg.password])
-    if run_cfg.remote_dir:
-        cmd.extend(["--dir", run_cfg.remote_dir])
-    if run_cfg.port is not None:
-        cmd.extend(["--port", str(run_cfg.port)])
-    if run_cfg.variant:
-        cmd.extend(["--variant", run_cfg.variant])
-    if run_cfg.record_thinking is True or run_cfg.thinking is True:
-        cmd.append("--thinking")
+
+    for key, val in (run_cfg.cli_kwargs or {}).items():
+        flag = f"-{key}" if len(key) == 1 else f"--{key}"
+        vals = val if isinstance(val, (list, tuple)) else [val]
+        for v in vals:
+            if v is True:
+                cmd.append(flag)
+            elif v is False or v is None:
+                continue
+            elif len(key) == 1:
+                cmd.extend([flag, str(v)])
+            else:
+                cmd.append(f"{flag}={v}")
 
     if prompt:
         cmd.append(prompt)

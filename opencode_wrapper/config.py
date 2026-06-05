@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Mapping
 
 # Permission values accepted by OpenCode
@@ -131,29 +130,17 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
 
 @dataclass
 class RunConfig:
-    """Per-invocation settings merged into env and CLI."""
+    """Per-invocation settings merged into env and CLI.
 
+    Most fields are honored by both modes (run mode via CLI/env, server/session
+    mode via the prompt body/env).  ``cli_kwargs`` is the exception: it is a
+    raw passthrough of ``opencode run`` CLI flags and is **ignored by server/
+    session mode**, which has no CLI surface.
+    """
+
+    # --- honored by both modes ---
     agent: str | None = None
     model: str | None = None
-    files: tuple[str | Path, ...] = ()
-    title: str | None = None
-    command: str | None = None
-    continue_session: bool = False
-    session_id: str | None = None
-    fork: bool = False
-    share: bool | None = None
-    attach: str | None = None
-    password: str | None = None
-    remote_dir: str | None = None
-    port: int | None = None
-    variant: str | None = None
-    # Include OpenCode reasoning/thinking parts in the JSON event stream.
-    # This maps to `opencode run --thinking`; it does not set model reasoning effort.
-    record_thinking: bool | None = None
-    # Backward-compatible alias for record_thinking.
-    thinking: bool | None = None
-    print_logs: bool | None = None
-    log_level: str | None = None
     disable_autoupdate: bool = True
     inherit_user_config: bool = False
     extra_env: Mapping[str, str] | None = None
@@ -163,6 +150,16 @@ class RunConfig:
     tools: dict[str, Any] | None = None
     instructions: list[str] | None = None
     config_overrides: dict[str, Any] | None = None
+    # --- run mode only: passed through verbatim to `opencode run` as CLI flags;
+    # server/session mode ignores this entirely.
+    # e.g. {"title": "x", "continue": True, "session": "ses_1", "fork": True,
+    #       "thinking": True, "f": ["a.txt"]}
+    # build_argv expands each entry: bool True -> "--flag", a value -> "--flag=value"
+    # (long) or "-f value" (single-char), a list -> repeated, False/None -> skipped.
+    # Note: server mode has no --thinking equivalent; reasoning parts are produced
+    # per the model's reasoning config and published to the SSE bus unconditionally,
+    # so they already land in result.events / log_file with no opt-in.
+    cli_kwargs: dict[str, Any] | None = None
 
     def build_opencode_config_dict(self) -> dict[str, Any]:
         """Build the dict serialized to ``OPENCODE_CONFIG_CONTENT``."""

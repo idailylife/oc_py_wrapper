@@ -62,11 +62,13 @@ async def main():
 asyncio.run(main())
 ```
 
-Set `RunConfig(record_thinking=True)` when you want OpenCode reasoning/thinking
-parts included in `result.events` and `log_file` JSON lines. This only maps to
-OpenCode's display/output flag `--thinking`; it does not change model reasoning
-effort. Use `variant` separately if you intentionally want a provider-specific
-reasoning effort.
+Set `RunConfig(cli_kwargs={"thinking": True})` when you want OpenCode
+reasoning/thinking parts included in `result.events` and `log_file` JSON lines in
+**run mode**. This maps to OpenCode's display/output flag `--thinking`; it does
+not change model reasoning effort. In **server/session mode** there is no
+`--thinking` equivalent — reasoning parts are produced per the model's reasoning
+config and streamed onto the SSE bus unconditionally, so they already land in
+`result.events` / `log_file` with no opt-in.
 
 ### Multi-turn conversation (`OpenCodeSession`)
 
@@ -113,9 +115,9 @@ async with OpenCodeSession(client, ".", run_cfg=RunConfig(permission={"bash": "a
 ```
 
 When `on_permission` is `None` (the default), any `permission.asked` is
-auto-rejected so a turn never blocks. File attachments (`RunConfig.files`) are not
-yet supported in server-mode sessions — embed file content in the prompt or use
-`async_run` for file-based runs.
+auto-rejected so a turn never blocks. File attachments are run-mode only — pass
+`RunConfig(cli_kwargs={"f": ["a.txt", "b.png"]})` to `async_run`. Server-mode
+sessions ignore `cli_kwargs`, so embed file content in the prompt instead.
 
 #### Answering the model's questions
 
@@ -208,7 +210,23 @@ host OpenCode config as-is. For reproducible runs, pass `model`, `permission`,
 
 ## CLI arguments
 
-`RunConfig` maps to flags such as `--agent`, `-m`, `-f`, `--attach`, `--title`, etc. Prompt text is appended as the final `opencode run` message argument.
+In run mode, `model` and `agent` map to `-m` and `--agent`. Every other
+`opencode run` flag is passed through `RunConfig.cli_kwargs`, a raw dict expanded
+by `build_argv`:
+
+- bool `True` → `--flag` (e.g. `{"fork": True}` → `--fork`)
+- a value → `--flag=value` (e.g. `{"title": "demo"}` → `--title=demo`)
+- a single-char key → `-k value` (e.g. `{"f": "a.txt"}` → `-f a.txt`)
+- a list/tuple → repeated (e.g. `{"f": ["a.txt", "b.txt"]}` → `-f a.txt -f b.txt`)
+- `False` / `None` → skipped
+
+```python
+RunConfig(model="anthropic/claude", cli_kwargs={"fork": True, "title": "demo", "f": ["a.txt"]})
+# -> opencode run --format json -m anthropic/claude --fork --title=demo -f a.txt <prompt>
+```
+
+Prompt text is appended as the final `opencode run` message argument.
+`cli_kwargs` is ignored by `OpenCodeSession` (server mode has no CLI surface).
 
 ## Tests
 

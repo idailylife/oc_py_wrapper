@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -40,26 +39,66 @@ def test_build_argv_minimal() -> None:
     assert argv[-1] == "hello"
 
 
-def test_build_argv_with_agent_model_files() -> None:
-    cfg = RunConfig(agent="plan", model="anthropic/claude-3-5-haiku-20241022", files=(Path("a.txt"),))
+def test_build_argv_with_agent_model_and_file_cli_kwarg() -> None:
+    cfg = RunConfig(
+        agent="plan",
+        model="anthropic/claude-3-5-haiku-20241022",
+        cli_kwargs={"f": ("a.txt",)},
+    )
     argv = build_argv("/x/opencode", "p", cfg)
     assert "--agent" in argv
     assert "plan" in argv
     assert "-m" in argv
-    assert "-f" in argv
+    # single-char key -> "-f a.txt" (separate argv entries)
+    assert argv[argv.index("-f") + 1] == "a.txt"
 
 
-def test_build_argv_record_thinking_adds_display_flag_only() -> None:
-    cfg = RunConfig(record_thinking=True)
+def test_build_argv_thinking_cli_kwarg_adds_display_flag() -> None:
+    cfg = RunConfig(cli_kwargs={"thinking": True})
     argv = build_argv("/x/opencode", "p", cfg)
     assert "--thinking" in argv
-    assert "--variant" not in argv
 
 
-def test_build_argv_thinking_alias_still_adds_display_flag() -> None:
-    cfg = RunConfig(thinking=True)
-    argv = build_argv("/x/opencode", "p", cfg)
-    assert "--thinking" in argv
+def test_build_argv_cli_kwargs_bool_true_emits_bare_flag() -> None:
+    argv = build_argv("/x/opencode", "p", RunConfig(cli_kwargs={"fork": True}))
+    assert "--fork" in argv
+
+
+def test_build_argv_cli_kwargs_value_emits_long_flag_eq() -> None:
+    argv = build_argv("/x/opencode", "p", RunConfig(cli_kwargs={"title": "demo"}))
+    assert "--title=demo" in argv
+
+
+def test_build_argv_cli_kwargs_single_char_value_uses_separate_args() -> None:
+    argv = build_argv("/x/opencode", "p", RunConfig(cli_kwargs={"p": "secret"}))
+    assert argv[argv.index("-p") + 1] == "secret"
+
+
+def test_build_argv_cli_kwargs_list_repeats_flag() -> None:
+    argv = build_argv("/x/opencode", "p", RunConfig(cli_kwargs={"f": ["a.txt", "b.txt"]}))
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "-f"] == ["a.txt", "b.txt"]
+
+
+def test_build_argv_cli_kwargs_false_and_none_skipped() -> None:
+    argv = build_argv(
+        "/x/opencode", "p", RunConfig(cli_kwargs={"fork": False, "title": None})
+    )
+    assert "--fork" not in argv
+    assert not any(a.startswith("--title") for a in argv)
+
+
+def test_build_argv_cli_kwargs_coexist_with_model_agent_order() -> None:
+    cfg = RunConfig(
+        model="anthropic/claude",
+        cli_kwargs={"fork": True, "title": "demo", "session": "ses_1", "f": ["a.txt"]},
+    )
+    argv = build_argv("opencode", "hi", cfg)
+    assert argv == [
+        "opencode", "run", "--format", "json",
+        "-m", "anthropic/claude",
+        "--fork", "--title=demo", "--session=ses_1", "-f", "a.txt",
+        "hi",
+    ]
 
 
 def test_build_env_config_content_and_autoupdate() -> None:

@@ -135,12 +135,8 @@ class OpenCodeSession:
         return quote(self._workspace, safe="")
 
     def _build_prompt_body(self, prompt: str, cfg: RunConfig) -> dict[str, Any]:
-        if cfg.files:
-            raise NotImplementedError(
-                "File attachments (RunConfig.files) are not supported in server-mode "
-                "OpenCodeSession yet; embed file content in the prompt or use "
-                "AsyncOpenCodeClient.async_run for file-based runs."
-            )
+        # cfg.cli_kwargs is run-mode only (it expands to `opencode run` CLI
+        # flags) and is intentionally ignored here — server mode has no CLI.
         body: dict[str, Any] = {"parts": [{"type": "text", "text": prompt}]}
         if cfg.model:
             body["model"] = split_model(cfg.model)
