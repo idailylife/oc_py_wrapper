@@ -17,6 +17,7 @@ possible with the one-shot run-mode subprocess.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from urllib.parse import quote
@@ -71,6 +72,12 @@ class OpenCodeSession:
         auto-rejected so a turn never blocks. The ``question`` tool is enabled by
         default in ``opencode serve`` (it is gated on ``OPENCODE_CLIENT``, whose
         default ``"cli"`` enables it).
+    log_file:
+        Session-level event log.  When given, every event from every turn is
+        appended to this file as a JSON line (flushed immediately), so partial
+        progress survives crashes.  These are the same event dicts that land in
+        each turn's ``result.events``.  The file is truncated once at
+        ``__aenter__`` and accumulates across all turns until ``__aexit__``.
     """
 
     def __init__(
@@ -82,6 +89,7 @@ class OpenCodeSession:
         timeout_s: float | None = None,
         on_permission: Optional[PermissionCallback] = None,
         on_question: Optional[QuestionCallback] = None,
+        log_file: str | Path | None = None,
     ) -> None:
         self._client = client
         self._workspace = str(Path(workspace).expanduser().resolve())
@@ -89,6 +97,8 @@ class OpenCodeSession:
         self._timeout_s = timeout_s
         self._on_permission = on_permission
         self._on_question = on_question
+        self._log_file = log_file
+        self._log_fh = None
         self._server: _OpenCodeServer | None = None
         self.session_id: str | None = None
 
@@ -101,18 +111,25 @@ class OpenCodeSession:
         await self._server.start()
         session = await self._server.post(f"/session?directory={self._dir_q()}", {})
         self.session_id = session["id"]
+        if self._log_file is not None:
+            self._log_fh = open(self._log_file, "w")
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self._server is not None:
-            if self.session_id:
-                try:
-                    await self._server.delete(f"/session/{self.session_id}")
-                except Exception:
-                    pass
-            await self._server.aclose()
-            self._server = None
-            self.session_id = None
+        try:
+            if self._server is not None:
+                if self.session_id:
+                    try:
+                        await self._server.delete(f"/session/{self.session_id}")
+                    except Exception:
+                        pass
+                await self._server.aclose()
+                self._server = None
+                self.session_id = None
+        finally:
+            if self._log_fh is not None:
+                self._log_fh.close()
+                self._log_fh = None
 
     def _dir_q(self) -> str:
         return quote(self._workspace, safe="")
@@ -185,6 +202,9 @@ class OpenCodeSession:
             while True:
                 ev = await queue.get()
                 events.append(ev)
+                if self._log_fh is not None:
+                    self._log_fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+                    self._log_fh.flush()
                 etype = ev.get("type")
                 props = ev.get("properties", {}) if isinstance(ev.get("properties"), dict) else {}
 

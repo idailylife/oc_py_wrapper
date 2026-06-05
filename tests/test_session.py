@@ -9,6 +9,7 @@ event-loop contract can be exercised without spawning a real server.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -153,6 +154,45 @@ async def test_session_multi_turn_continuity(monkeypatch, tmp_path) -> None:
     # Server and session torn down on exit.
     assert srv.closed is True
     assert any(f"/session/{SID}" == d for d in srv.deleted)
+
+
+@pytest.mark.asyncio
+async def test_log_file_accumulates_events_across_turns(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    log_path = tmp_path / "sess.jsonl"
+    turn1, turn2 = _text_turn("hi Bob"), _text_turn("Bob")
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig(), log_file=log_path) as s:
+        srv = holder["server"]
+        srv.turn_events = [turn1, turn2]
+        srv.final_messages_by_turn = [_final_messages("hi Bob"), _final_messages("Bob")]
+        r1 = await s.send("My name is Bob.")
+        r2 = await s.send("What is my name?")
+
+    lines = log_path.read_text().splitlines()
+    logged = [json.loads(line) for line in lines]
+    # Every event from both turns, in order, appended (not truncated per turn).
+    assert logged == turn1 + turn2
+    # Same dicts that land in each turn's result.events.
+    assert logged == r1.events + r2.events
+
+
+@pytest.mark.asyncio
+async def test_no_log_file_writes_nothing(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    async with OpenCodeSession(client, tmp_path, run_cfg=RunConfig()) as s:
+        assert s._log_fh is None
+        srv = holder["server"]
+        srv.turn_events = [_text_turn("x")]
+        await s.send("turn 1")
+
+    assert not list(tmp_path.glob("*.jsonl"))
 
 
 @pytest.mark.asyncio
