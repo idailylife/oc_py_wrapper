@@ -30,14 +30,17 @@ from opencode_wrapper.client import build_env, _isolate_user_config
 from opencode_wrapper.config import RunConfig
 from opencode_wrapper.errors import OpenCodeProcessError
 
-# Short per-attempt timeout for the startup health probe. `opencode serve`
-# binds the TCP port (NodeHttpServer.layer) *before* its request handler is
-# attached (HttpServer.serve -> server.on("request", ...)). A probe whose
-# request lands in that window has its 'request' event dropped and never gets a
-# response, so each attempt must time out fast and retry on a *fresh* connection
-# — the next connection, made after the handler is attached, succeeds. (Real API
-# calls keep the longer default timeout.)
+# Per-attempt timeout for the post-startup confirmation probe. Startup now gates
+# on opencode's own stdout readiness line ("... server listening on ..."), which
+# is printed only after the request handler is attached, so by the time we probe
+# the handler is guaranteed up and the probe passes on the first try. The short
+# timeout just keeps the loop responsive as a defensive backstop. (Real API calls
+# keep the longer default timeout.)
 _HEALTH_PROBE_TIMEOUT_S = 1.0
+
+# Substring of opencode's stdout readiness line, e.g.
+# "opencode server listening on http://127.0.0.1:1234".
+_LISTENING_MARKER = "server listening on"
 
 
 def _free_port() -> int:
@@ -87,6 +90,7 @@ class _OpenCodeServer:
         self._sse_resp: Any = None
         self._sse_stop = threading.Event()
         self._sse_connected = threading.Event()
+        self._listening: asyncio.Event | None = None
         self._tasks: list[asyncio.Task[Any]] = []
 
     # -- env -----------------------------------------------------------------
@@ -121,17 +125,25 @@ class _OpenCodeServer:
     # -- lifecycle -----------------------------------------------------------
     async def start(self, *, health_timeout_s: float = 15.0) -> None:
         self._loop = asyncio.get_running_loop()
+        self._listening = asyncio.Event()
         env = self._build_server_env()
         self._proc = await asyncio.create_subprocess_exec(
             self._binary, "serve", "--port", str(self._port), "--hostname", "127.0.0.1",
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._workspace,
             env=env,
         )
+        self._tasks.append(asyncio.create_task(self._drain_stdout()))
         self._tasks.append(asyncio.create_task(self._drain_stderr()))
 
         deadline = self._loop.time() + health_timeout_s
+        # Gate on opencode's readiness line rather than racing the TCP port: the
+        # kernel accepts connections the instant serve() calls listen(), which is
+        # *before* the request handler is attached, so an early probe would
+        # connect but never get a response.
+        await self._wait_until_listening(health_timeout_s, deadline)
+        # The handler is guaranteed up now; confirm with a probe.
         while True:
             if self._proc.returncode is not None:
                 raise OpenCodeProcessError(
@@ -159,6 +171,42 @@ class _OpenCodeServer:
         self._sse_thread = threading.Thread(target=self._run_sse, daemon=True)
         self._sse_thread.start()
         await asyncio.to_thread(self._sse_connected.wait, 5.0)
+
+    async def _wait_until_listening(self, health_timeout_s: float, deadline: float) -> None:
+        """Block until opencode prints its readiness line, the process exits, or the deadline passes."""
+        assert self._proc is not None and self._loop is not None and self._listening is not None
+        waiter = asyncio.ensure_future(self._listening.wait())
+        proc_done = asyncio.ensure_future(self._proc.wait())
+        try:
+            await asyncio.wait(
+                {waiter, proc_done},
+                timeout=max(deadline - self._loop.time(), 0.0),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            waiter.cancel()
+            proc_done.cancel()
+        if self._listening.is_set():
+            return
+        await self.aclose()
+        rc = self._proc.returncode
+        raise OpenCodeProcessError(
+            exit_code=rc if rc is not None else -1,
+            stderr=f"opencode serve did not announce readiness in {health_timeout_s}s\n"
+            + "".join(self._stderr_tail),
+            events=[],
+            raw_stdout_lines=[],
+        )
+
+    async def _drain_stdout(self) -> None:
+        assert self._proc is not None and self._proc.stdout is not None
+        while True:
+            line = await self._proc.stdout.readline()
+            if not line:
+                break
+            if self._listening is not None and not self._listening.is_set():
+                if _LISTENING_MARKER in line.decode(errors="replace"):
+                    self._listening.set()
 
     async def _drain_stderr(self) -> None:
         assert self._proc is not None and self._proc.stderr is not None
