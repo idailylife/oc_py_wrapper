@@ -30,6 +30,15 @@ from opencode_wrapper.client import build_env, _isolate_user_config
 from opencode_wrapper.config import RunConfig
 from opencode_wrapper.errors import OpenCodeProcessError
 
+# Short per-attempt timeout for the startup health probe. `opencode serve`
+# binds the TCP port (NodeHttpServer.layer) *before* its request handler is
+# attached (HttpServer.serve -> server.on("request", ...)). A probe whose
+# request lands in that window has its 'request' event dropped and never gets a
+# response, so each attempt must time out fast and retry on a *fresh* connection
+# — the next connection, made after the handler is attached, succeeds. (Real API
+# calls keep the longer default timeout.)
+_HEALTH_PROBE_TIMEOUT_S = 1.0
+
 
 def _free_port() -> int:
     """Pick an ephemeral free TCP port on localhost."""
@@ -132,7 +141,7 @@ class _OpenCodeServer:
                     raw_stdout_lines=[],
                 )
             try:
-                await asyncio.to_thread(self._get_sync, "/session")
+                await asyncio.to_thread(self._get_sync, "/session", _HEALTH_PROBE_TIMEOUT_S)
                 break
             except (urllib.error.URLError, ConnectionError, OSError):
                 if self._loop.time() >= deadline:
@@ -230,7 +239,9 @@ class _OpenCodeServer:
         self._queues.pop(session_id, None)
 
     # -- HTTP (stdlib, run in a thread) --------------------------------------
-    def _request_sync(self, method: str, path: str, body: dict[str, Any] | None) -> Any:
+    def _request_sync(
+        self, method: str, path: str, body: dict[str, Any] | None, timeout: float = 120.0
+    ) -> Any:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             self.base + path,
@@ -238,12 +249,12 @@ class _OpenCodeServer:
             headers={"Content-Type": "application/json"} if data is not None else {},
             method=method,
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
         return json.loads(raw) if raw else None
 
-    def _get_sync(self, path: str) -> Any:
-        return self._request_sync("GET", path, None)
+    def _get_sync(self, path: str, timeout: float = 120.0) -> Any:
+        return self._request_sync("GET", path, None, timeout)
 
     async def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
         return await asyncio.to_thread(self._request_sync, "POST", path, body)
