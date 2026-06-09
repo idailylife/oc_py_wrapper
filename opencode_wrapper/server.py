@@ -230,7 +230,10 @@ class _OpenCodeServer:
                 self._proc.terminate()
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self._proc.kill()
+                try:
+                    self._proc.kill()
+                except ProcessLookupError:
+                    pass
             except ProcessLookupError:
                 pass
         for d in self._cleanup_dirs:

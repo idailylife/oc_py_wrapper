@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from opencode_wrapper.config import RunConfig, split_model, validate_permission_actions
@@ -107,6 +109,60 @@ async def test_unsubscribe_removes_queue() -> None:
     q = srv.subscribe("ses_b")
     srv._dispatch({"type": "x", "properties": {"sessionID": "ses_a"}})
     assert q.qsize() == 0  # ses_a event dropped, ses_b untouched
+
+
+# -- aclose() subprocess teardown race --------------------------------------
+class _FakeProc:
+    """Live subprocess whose ``kill()`` loses the post-timeout race.
+
+    Models the window where the child exits between the ``wait_for`` timeout
+    and ``kill()`` — at which point asyncio's ``kill()`` raises
+    ``ProcessLookupError`` even though ``returncode`` is still ``None``.
+    """
+
+    def __init__(self, *, kill_raises: bool = True, terminate_raises: bool = False) -> None:
+        self.returncode = None
+        self._kill_raises = kill_raises
+        self._terminate_raises = terminate_raises
+        self.killed = False
+
+    def terminate(self) -> None:
+        if self._terminate_raises:
+            raise ProcessLookupError
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._kill_raises:
+            raise ProcessLookupError
+
+    async def wait(self) -> int:
+        await asyncio.sleep(3600)  # force the wait_for timeout path
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_aclose_swallows_process_lookup_error_from_kill(monkeypatch) -> None:
+    # Make wait_for time out instantly so aclose() takes the kill() branch.
+    async def _instant_timeout(awaitable, timeout):  # noqa: ANN001
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("opencode_wrapper.server.asyncio.wait_for", _instant_timeout)
+
+    srv = _OpenCodeServer("/fake/opencode", RunConfig(), "/tmp/ws")
+    proc = _FakeProc(kill_raises=True)
+    srv._proc = proc  # type: ignore[assignment]
+
+    await srv.aclose()  # must not raise
+    assert proc.killed
+
+
+@pytest.mark.asyncio
+async def test_aclose_swallows_process_lookup_error_from_terminate() -> None:
+    srv = _OpenCodeServer("/fake/opencode", RunConfig(), "/tmp/ws")
+    srv._proc = _FakeProc(terminate_raises=True)  # type: ignore[assignment]
+    await srv.aclose()  # sibling except clause handles it
 
 
 # -- aggregate_server_result ------------------------------------------------

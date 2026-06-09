@@ -181,6 +181,34 @@ async def test_log_file_accumulates_events_across_turns(monkeypatch, tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_aexit_swallows_aclose_failure_and_closes_log(monkeypatch, tmp_path) -> None:
+    """Teardown errors (e.g. a subprocess-reap race) must not escape __aexit__.
+
+    Regression for concurrent-session shutdown where aclose() raised
+    ProcessLookupError and crashed the runner's asyncio.gather().
+    """
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    log_path = tmp_path / "sess.jsonl"
+    session = OpenCodeSession(client, tmp_path, run_cfg=RunConfig(), log_file=log_path)
+    await session.__aenter__()
+    srv = holder["server"]
+
+    async def _boom() -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(srv, "aclose", _boom)
+
+    # Must not raise despite aclose() blowing up mid-teardown.
+    await session.__aexit__(None, None, None)
+
+    assert session._log_fh is None  # finally still closed the log file
+    assert session._server is None
+
+
+@pytest.mark.asyncio
 async def test_no_log_file_writes_nothing(monkeypatch, tmp_path) -> None:
     holder = _install_fake(monkeypatch)
     client = AsyncOpenCodeClient(binary="opencode")

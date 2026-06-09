@@ -123,7 +123,10 @@ class OpenCodeSession:
                         await self._server.delete(f"/session/{self.session_id}")
                     except Exception:
                         pass
-                await self._server.aclose()
+                try:
+                    await self._server.aclose()
+                except Exception:
+                    pass
                 self._server = None
                 self.session_id = None
         finally:
