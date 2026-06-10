@@ -15,9 +15,12 @@ transfer-encoding transparently) and events are dispatched onto per-session
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -37,6 +40,18 @@ from opencode_wrapper.errors import OpenCodeProcessError
 # timeout just keeps the loop responsive as a defensive backstop. (Real API calls
 # keep the longer default timeout.)
 _HEALTH_PROBE_TIMEOUT_S = 1.0
+
+
+# ``asyncio.to_thread`` is 3.9+; mirror its contextvar-propagating implementation
+# on 3.8 so server mode stays usable down to the package's declared floor.
+if sys.version_info >= (3, 9):
+    _to_thread = asyncio.to_thread
+else:
+    async def _to_thread(func, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        call = functools.partial(ctx.run, func, *args, **kwargs)
+        return await loop.run_in_executor(None, call)
 
 # Substring of opencode's stdout readiness line, e.g.
 # "opencode server listening on http://127.0.0.1:1234".
@@ -153,7 +168,7 @@ class _OpenCodeServer:
                     raw_stdout_lines=[],
                 )
             try:
-                await asyncio.to_thread(self._get_sync, "/session", _HEALTH_PROBE_TIMEOUT_S)
+                await _to_thread(self._get_sync, "/session", _HEALTH_PROBE_TIMEOUT_S)
                 break
             except (urllib.error.URLError, ConnectionError, OSError):
                 if self._loop.time() >= deadline:
@@ -170,7 +185,7 @@ class _OpenCodeServer:
         # Connect the SSE bus before any prompt is sent so no events are missed.
         self._sse_thread = threading.Thread(target=self._run_sse, daemon=True)
         self._sse_thread.start()
-        await asyncio.to_thread(self._sse_connected.wait, 5.0)
+        await _to_thread(self._sse_connected.wait, 5.0)
 
     async def _wait_until_listening(self, health_timeout_s: float, deadline: float) -> None:
         """Block until opencode prints its readiness line, the process exits, or the deadline passes."""
@@ -308,10 +323,10 @@ class _OpenCodeServer:
         return self._request_sync("GET", path, None, timeout)
 
     async def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
-        return await asyncio.to_thread(self._request_sync, "POST", path, body)
+        return await _to_thread(self._request_sync, "POST", path, body)
 
     async def get(self, path: str) -> Any:
-        return await asyncio.to_thread(self._request_sync, "GET", path, None)
+        return await _to_thread(self._request_sync, "GET", path, None)
 
     async def delete(self, path: str) -> Any:
-        return await asyncio.to_thread(self._request_sync, "DELETE", path, None)
+        return await _to_thread(self._request_sync, "DELETE", path, None)
