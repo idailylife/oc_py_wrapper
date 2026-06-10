@@ -115,7 +115,9 @@ def run_result_fuzzy_text(result: "RunResult") -> str:
 def _tool_summary(ev: dict[str, Any]) -> dict[str, Any] | None:
     t = ev.get("type")
     if t in ("tool_use", "tool_call", "tool_result", "tool"):
-        return {k: v for k, v in ev.items() if k != "type"} | {"type": t}
+        summary = {k: v for k, v in ev.items() if k != "type"}
+        summary["type"] = t
+        return summary
     if t == "step_finish" and "tool" in ev:
         return {"type": "step_tool", "payload": ev.get("tool")}
     return None

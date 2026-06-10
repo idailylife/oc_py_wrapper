@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import quote
 
 from opencode_wrapper.config import RunConfig, split_model, validate_permission_actions
@@ -33,13 +33,13 @@ if TYPE_CHECKING:
 _UNSET: Any = object()
 
 # An async callback invoked on each permission request; returns the decision.
-PermissionCallback = Callable[[dict[str, Any]], Awaitable[str]]
+PermissionCallback = Callable[[Dict[str, Any]], Awaitable[str]]
 
 # An async callback invoked on each ``question.asked`` request. Returns the
 # answers: a list with one entry per question, each entry a list of selected
 # option labels (multiple labels only when the question allows ``multiple``).
 # Returning ``None`` rejects the question (the model is told it was dismissed).
-QuestionCallback = Callable[[dict[str, Any]], Awaitable[Optional[list[list[str]]]]]
+QuestionCallback = Callable[[Dict[str, Any]], Awaitable[Optional[List[List[str]]]]]
 
 
 class OpenCodeSession:
