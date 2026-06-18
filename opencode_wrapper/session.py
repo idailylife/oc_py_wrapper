@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, List, Optional
 from urllib.parse import quote
 
 from opencode_wrapper.config import RunConfig, split_model, validate_permission_actions
@@ -78,6 +78,11 @@ class OpenCodeSession:
         progress survives crashes.  These are the same event dicts that land in
         each turn's ``result.events``.  The file is truncated once at
         ``__aenter__`` and accumulates across all turns until ``__aexit__``.
+    log_exclude_types:
+        Optional collection of event ``type`` values to omit from ``log_file``
+        (e.g. ``{"message.part.delta"}`` to keep streaming chunks out of the
+        log in real time).  Excluded events are still retained in
+        ``result.events``.  ``None`` (the default) logs every event.
     """
 
     def __init__(
@@ -90,6 +95,7 @@ class OpenCodeSession:
         on_permission: Optional[PermissionCallback] = None,
         on_question: Optional[QuestionCallback] = None,
         log_file: str | Path | None = None,
+        log_exclude_types: Iterable[str] | None = None,
     ) -> None:
         self._client = client
         self._workspace = str(Path(workspace).expanduser().resolve())
@@ -98,6 +104,7 @@ class OpenCodeSession:
         self._on_permission = on_permission
         self._on_question = on_question
         self._log_file = log_file
+        self._log_exclude_types = frozenset(log_exclude_types or ())
         self._log_fh = None
         self._server: _OpenCodeServer | None = None
         self.session_id: str | None = None
@@ -201,7 +208,10 @@ class OpenCodeSession:
             while True:
                 ev = await queue.get()
                 events.append(ev)
-                if self._log_fh is not None:
+                if (
+                    self._log_fh is not None
+                    and ev.get("type") not in self._log_exclude_types
+                ):
                     self._log_fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
                     self._log_fh.flush()
                 etype = ev.get("type")

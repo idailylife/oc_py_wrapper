@@ -79,7 +79,7 @@ The wrapper lives in `opencode_wrapper/` with six modules:
 
 ### Multi-turn sessions
 
-`OpenCodeSession(client, workspace, *, run_cfg=..., on_permission=..., log_file=...)` is an async context manager for multi-turn chat. `log_file` (optional) writes a session-level JSON-lines event log: every event from every turn is appended (flushed immediately), truncated once at `__aenter__` and accumulated across turns until `__aexit__` — the server-mode analogue of `async_run`'s per-call `log_file`. Unlike run mode (one-shot `opencode run` per call), a session owns a headless `opencode serve` process for the lifetime of the `async with` block and re-prompts one server-side session, so the model retains context **natively** across turns:
+`OpenCodeSession(client, workspace, *, run_cfg=..., on_permission=..., log_file=...)` is an async context manager for multi-turn chat. `log_file` (optional) writes a session-level JSON-lines event log: every event from every turn is appended (flushed immediately), truncated once at `__aenter__` and accumulated across turns until `__aexit__` — the server-mode analogue of `async_run`'s per-call `log_file`. `log_exclude_types` (optional, a collection of event `type` values) omits matching events from `log_file` (e.g. `{"message.part.delta"}` to keep streaming chunks off disk); excluded events still land in each turn's `result.events`. Unlike run mode (one-shot `opencode run` per call), a session owns a headless `opencode serve` process for the lifetime of the `async with` block and re-prompts one server-side session, so the model retains context **natively** across turns:
 
 ```python
 async def approve(props):  # optional human-in-the-loop permission callback

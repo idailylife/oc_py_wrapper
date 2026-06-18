@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Iterable, Mapping
 
 from opencode_wrapper.config import RunConfig, validate_config_for_run
 from opencode_wrapper.config import loads_jsonc, sanitize_user_config_json
@@ -424,6 +424,7 @@ class AsyncOpenCodeClient:
         run_cfg: RunConfig | None = None,
         timeout_s: float | None = None,
         log_file: str | Path | None = None,
+        log_exclude_types: Iterable[str] | None = None,
         max_retries: int = 2,
         retry_delay_s: float = 1.0,
         data_home: str | None = None,
@@ -439,6 +440,11 @@ class AsyncOpenCodeClient:
 
         Parameters
         ----------
+        log_exclude_types:
+            Optional collection of event ``type`` values to omit from
+            ``log_file`` (e.g. ``{"message.part.delta"}`` to keep streaming
+            chunks off disk).  Excluded events are still returned in
+            ``RunResult.events``.  ``None`` (the default) logs every event.
         max_retries:
             Number of additional attempts when opencode crashes during SQLite
             startup (WAL-pragma race).  Set to ``0`` to disable retry.
@@ -446,6 +452,7 @@ class AsyncOpenCodeClient:
             Seconds to wait between retry attempts.
         """
         run_cfg = run_cfg or RunConfig()
+        exclude_types = frozenset(log_exclude_types or ())
 
         async def _inner() -> RunResult:
             validate_config_for_run(run_cfg)
@@ -463,7 +470,7 @@ class AsyncOpenCodeClient:
                     async for line, ev in _stdout_line_event_iter(proc):
                         raw_acc.append(line)
                         events_acc.append(ev)
-                        if log_fh is not None:
+                        if log_fh is not None and ev.get("type") not in exclude_types:
                             log_fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
                             log_fh.flush()
             finally:

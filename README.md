@@ -70,6 +70,11 @@ not change model reasoning effort. In **server/session mode** there is no
 config and streamed onto the SSE bus unconditionally, so they already land in
 `result.events` / `log_file` with no opt-in.
 
+Pass `async_run(..., log_exclude_types={"message.part.delta"})` to keep selected
+event types out of `log_file` (e.g. streaming delta chunks). Excluded events are
+still returned in `result.events` — this only trims the on-disk log. The default
+(`None`) logs every event.
+
 ### Multi-turn conversation (`OpenCodeSession`)
 
 For a stateful, multi-turn chat, use `OpenCodeSession` as an async context

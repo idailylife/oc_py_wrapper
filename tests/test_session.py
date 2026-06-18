@@ -181,6 +181,35 @@ async def test_log_file_accumulates_events_across_turns(monkeypatch, tmp_path) -
 
 
 @pytest.mark.asyncio
+async def test_log_exclude_types_drops_events_from_log_but_keeps_in_result(monkeypatch, tmp_path) -> None:
+    holder = _install_fake(monkeypatch)
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    log_path = tmp_path / "sess.jsonl"
+    turn = [
+        {"type": "message.part.delta", "properties": {"delta": "hi"}},
+        {"type": "message.part.delta", "properties": {"delta": " Bob"}},
+        *_text_turn("hi Bob"),
+    ]
+
+    async with OpenCodeSession(
+        client, tmp_path, run_cfg=RunConfig(), log_file=log_path,
+        log_exclude_types={"message.part.delta"},
+    ) as s:
+        srv = holder["server"]
+        srv.turn_events = [turn]
+        srv.final_messages_by_turn = [_final_messages("hi Bob")]
+        r = await s.send("hello")
+
+    logged = [json.loads(line) for line in log_path.read_text().splitlines()]
+    # Deltas dropped from the on-disk log...
+    assert all(ev["type"] != "message.part.delta" for ev in logged)
+    # ...but still present in the in-memory result.
+    assert any(ev["type"] == "message.part.delta" for ev in r.events)
+
+
+@pytest.mark.asyncio
 async def test_aexit_swallows_aclose_failure_and_closes_log(monkeypatch, tmp_path) -> None:
     """Teardown errors (e.g. a subprocess-reap race) must not escape __aexit__.
 

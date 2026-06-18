@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
@@ -249,6 +250,33 @@ async def test_async_run_success(monkeypatch, tmp_path) -> None:
     assert r.exit_code == 0
     assert r.final_text == "ok"
     assert len(r.events) == 1
+
+
+@pytest.mark.asyncio
+async def test_async_run_log_exclude_types_drops_events_from_log(monkeypatch, tmp_path) -> None:
+    proc = _FakeProc([
+        b'{"type":"message.part.delta","properties":{"delta":"o"}}\n',
+        b'{"type":"text","content":"ok"}\n',
+    ])
+    proc.returncode = 0
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    client = AsyncOpenCodeClient(binary="opencode")
+    monkeypatch.setattr(client, "resolved_binary", lambda: "/fake/opencode")
+
+    log_path = tmp_path / "run.jsonl"
+    with patch("asyncio.create_subprocess_exec", new=fake_exec):
+        r = await client.async_run(
+            "hi", tmp_path, run_cfg=RunConfig(), log_file=log_path,
+            log_exclude_types={"message.part.delta"},
+        )
+
+    logged = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert all(ev["type"] != "message.part.delta" for ev in logged)
+    # Delta still retained in the in-memory result.
+    assert any(ev["type"] == "message.part.delta" for ev in r.events)
 
 
 @pytest.mark.asyncio
