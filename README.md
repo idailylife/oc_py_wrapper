@@ -181,6 +181,28 @@ async def multi():
 
 Safe defaults for parallel runs (startup serialisation, private SQLite DB per run, and automatic retry on SQLite-startup crashes) are enabled out of the box — most users don't need to tune them. See *Concurrency notes* below if you want to.
 
+## Examples
+
+Runnable scripts under `examples/` (each takes `--binary` / `--model`, and most
+default to a throwaway temp workspace). Run from the repo root:
+
+```bash
+# 多轮会话：OpenCodeSession 原生保留跨轮上下文
+PYTHONPATH=. python examples/session_multi_turn.py
+
+# 实时事件流：async_stream 逐条打印解析后的事件
+PYTHONPATH=. python examples/stream_events.py
+
+# 事件日志：async_run(log_file=..., log_exclude_types=...) 落盘 + 类型过滤
+PYTHONPATH=. python examples/logging_events.py
+
+# 多智能体扇出：3 城并行查天气 + plan 汇总（4 次 run 调用）
+PYTHONPATH=. python examples/multi_agent_weather.py
+```
+
+These need a working `opencode` binary and provider auth (they make real API
+calls). Pass `--model provider/model` to pin a model.
+
 ## Configuration injection
 
 Per-call JSON is merged and passed as `OPENCODE_CONFIG_CONTENT` (see [OpenCode config](https://opencode.ai/docs/config/)). Use `RunConfig` fields:

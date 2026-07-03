@@ -47,6 +47,7 @@ async def main_async(
     workspace: Path,
     *,
     binary: str,
+    model: str,
     sequential: bool,
     output_file: Path,
 ) -> int:
@@ -61,15 +62,19 @@ async def main_async(
         encoding="utf-8",
     )
 
+    # worker 不指定 agent：默认主 agent 即可完成检索。
+    # 若显式指定 agent="general"（一个 subagent），opencode 会打印
+    # `agent "general" is a subagent ... Falling back to default agent` 告警。
     worker_cfg = RunConfig(
-        agent="general",
+        model=model,
         disable_autoupdate=True,
         permission={
             "*": "allow",
         },
     )
     summary_cfg = RunConfig(
-        agent="plan",
+        agent="plan",  # plan 是主 agent，合法
+        model=model,
         disable_autoupdate=True,
         permission={
             "*": "deny",
@@ -95,19 +100,19 @@ async def main_async(
                 print(f"【{city}】\n{text}\n", flush=True)
                 append_section(
                     output_file,
-                    f"general/{city} (exit={r.exit_code})",
+                    f"worker/{city} (exit={r.exit_code})",
                     run_raw_output_text(r),
                 )
             else:
                 print(f"【{city}】exit {r.exit_code}", file=sys.stderr, flush=True)
                 append_section(
                     output_file,
-                    f"general/{city} (exit={r.exit_code})",
+                    f"worker/{city} (exit={r.exit_code})",
                     run_raw_output_text(r),
                 )
         return city, r
 
-    print("=== 各城（general）===\n", flush=True)
+    print("=== 各城（worker）===\n", flush=True)
     if sequential:
         pairs = [await weather_for_city(c) for c in CITIES_CN]
     else:
@@ -157,6 +162,9 @@ async def main_async(
 def main() -> None:
     p = argparse.ArgumentParser(description="3 城天气并行查询 + 中文汇总")
     p.add_argument("--binary", default=None, help="opencode 可执行文件（默认从 PATH 查找）")
+    p.add_argument(
+        "--model", default="opencode/big-pickle", help="模型（provider/model，默认 opencode/big-pickle）"
+    )
     p.add_argument("--workspace", type=Path, default=None, help="工作目录（默认临时目录）")
     p.add_argument("--sequential", action="store_true", help="顺序执行 3 城")
     p.add_argument(
@@ -180,6 +188,7 @@ def main() -> None:
                 main_async(
                     ws,
                     binary=binary,
+                    model=args.model,
                     sequential=args.sequential,
                     output_file=args.output_file.expanduser().resolve(),
                 )
@@ -194,6 +203,7 @@ def main() -> None:
                 main_async(
                     ws,
                     binary=binary,
+                    model=args.model,
                     sequential=args.sequential,
                     output_file=args.output_file.expanduser().resolve(),
                 )
