@@ -57,6 +57,11 @@ else:
 # "opencode server listening on http://127.0.0.1:1234".
 _LISTENING_MARKER = "server listening on"
 
+# All harness HTTP goes to the localhost ``opencode serve`` we just spawned, so a
+# proxy must never be applied. An empty ``ProxyHandler({})`` disables proxy use for
+# requests made through this opener regardless of HTTP_PROXY/ALL_PROXY/NO_PROXY env.
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def _free_port() -> int:
     """Pick an ephemeral free TCP port on localhost."""
@@ -261,7 +266,7 @@ class _OpenCodeServer:
     # -- SSE -----------------------------------------------------------------
     def _run_sse(self) -> None:
         try:
-            resp = urllib.request.urlopen(self.base + "/event", timeout=None)
+            resp = _NO_PROXY_OPENER.open(self.base + "/event", timeout=None)
             self._sse_resp = resp
             assert self._loop is not None
             self._loop.call_soon_threadsafe(self._sse_connected.set)
@@ -315,7 +320,7 @@ class _OpenCodeServer:
             headers={"Content-Type": "application/json"} if data is not None else {},
             method=method,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _NO_PROXY_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read()
         return json.loads(raw) if raw else None
 
